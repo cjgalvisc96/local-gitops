@@ -1,0 +1,12 @@
+server:
+  service:
+    type: NodePort
+    nodePortHttp: 30080
+    nodePortHttps: 30443
+  extraArgs:
+    - --insecure
+
+configs:
+  secret:
+    argocdServerAdminPassword: "$2a$10$ix86nMMaA.YgKNfWFK7NZOh33T8tocnhKfnGpIzKRniKRVMwz/J0u"
+    argocdServerAdminPasswordMtime: "2026-06-18T00:00:00Z"

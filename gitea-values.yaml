@@ -1,0 +1,13 @@
+service:
+  http:
+    type: NodePort
+    nodePort: 30030
+
+gitea:
+  admin:
+    username: admin
+    password: adminadmin1
+    email: admin@local.dev
+
+persistence:
+  enabled: false
