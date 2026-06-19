@@ -5,8 +5,14 @@ set -euo pipefail
 # CONFIG
 #############################
 
-DEV_CLUSTER="kind-local-dev"
-PROD_CLUSTER="kind-local-prod"
+BINARIES=(
+  "kubectl"
+  "helm"
+  "kind"
+  "argocd"
+  "k9s"
+  "go"
+)
 
 HOSTS_ENTRIES=(
   "argocd.dev.local"
@@ -15,133 +21,176 @@ HOSTS_ENTRIES=(
   "app.prod.local"
 )
 
-BINARIES=(
-  "kubectl"
-  "helm"
-  "kind"
-  "argocd"
-)
-
 #############################
 # LOGGING
 #############################
 
 log() { echo "[NUKE] $*"; }
-warn() { echo "[WARN] $*"; }
+fail() { echo "[❌ FAILED] $*" >&2; exit 1; }
+ok() { echo "[✔] $*"; }
 
 #############################
-# DELETE KIND CLUSTERS
+# CLEAN KIND (DOCKER SOURCE OF TRUTH)
 #############################
 
-delete_clusters() {
-  log "Deleting Kind clusters..."
+delete_kind() {
+  log "Deleting Kind containers..."
 
-  for c in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
-    if kind get clusters 2>/dev/null | grep -q "^$c$"; then
-      kind delete cluster --name "$c" || true
-      log "Deleted cluster $c"
-    fi
-  done
-}
-
-#############################
-# CLEAN DOCKER
-#############################
-
-clean_docker() {
-  log "Cleaning Docker leftovers..."
-
-  docker ps -a --format '{{.ID}} {{.Names}}' | while read -r id name; do
+  sudo docker ps -a --format '{{.ID}} {{.Names}}' | while read -r id name; do
     if [[ "$name" == *"kind"* ]]; then
-      docker rm -f "$id" >/dev/null 2>&1 || true
-      log "Removed container $name"
+      sudo docker rm -f "$id" >/dev/null 2>&1 || true
     fi
   done
 
-  docker network prune -f >/dev/null 2>&1 || true
+  sudo docker network prune -f >/dev/null 2>&1 || true
+  sudo docker volume prune -f >/dev/null 2>&1 || true
 }
 
 #############################
-# CLEAN KUBECTL CONTEXTS
+# CLEAN KUBECONFIG
 #############################
 
-clean_kubectl() {
-  log "Cleaning kubectl contexts..."
+clean_kubeconfig() {
+  log "Removing kubeconfig..."
+  rm -rf "$HOME/.kube" || true
+}
 
-  for c in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
-    kubectl config delete-context "$c" >/dev/null 2>&1 || true
-    kubectl config delete-cluster "$c" >/dev/null 2>&1 || true
+#############################
+# REMOVE BINARIES (ALL SOURCES)
+#############################
+
+remove_binaries() {
+  log "Removing binaries..."
+
+  for bin in "${BINARIES[@]}"; do
+    sudo rm -f "/usr/local/bin/$bin" || true
+    sudo rm -f "/usr/bin/$bin" || true
+    sudo rm -f "/snap/bin/$bin" || true
+    rm -f "$HOME/.local/bin/$bin" || true
   done
 }
 
 #############################
-# REMOVE /etc/hosts ENTRIES
+# CLEAN HOSTS
 #############################
 
 clean_hosts() {
   log "Cleaning /etc/hosts..."
-
   for h in "${HOSTS_ENTRIES[@]}"; do
     sudo sed -i "/$h/d" /etc/hosts || true
   done
 }
 
 #############################
-# REMOVE BINARIES
-#############################
-
-remove_binaries() {
-  log "Removing Kubernetes toolchain binaries..."
-
-  for bin in "${BINARIES[@]}"; do
-    for path in \
-      "$HOME/.local/bin/$bin" \
-      "/usr/local/bin/$bin" \
-      "/usr/bin/$bin"
-    do
-      if [ -f "$path" ]; then
-        sudo rm -f "$path" || rm -f "$path" || true
-        log "Removed $path"
-      fi
-    done
-  done
-}
-
-#############################
-# REMOVE GO
+# GO CLEANUP
 #############################
 
 remove_go() {
-  log "Removing Go installation..."
+  log "Removing Go..."
 
-  # common install locations
   sudo rm -rf /usr/local/go || true
-  rm -rf "$HOME/go" || true
 
-  # remove PATH entries from shell configs
-  for f in "$HOME/.bashrc" "$HOME/.zshrc"; do
-    if [ -f "$f" ]; then
-      sed -i '/go\/bin/d' "$f" || true
-      sed -i '/GOROOT/d' "$f" || true
-      sed -i '/GOPATH/d' "$f" || true
-      log "Cleaned Go env from $f"
-    fi
-  done
+  if [ -d "$HOME/go" ]; then
+    sudo chown -R "$USER:$USER" "$HOME/go" || true
+    sudo chmod -R u+rwX "$HOME/go" || true
+    rm -rf "$HOME/go" || true
+  fi
 }
 
 #############################
-# CLEAN MISE (OPTIONAL BUT SAFE)
+# K9s CLEANUP
+#############################
+
+remove_k9s() {
+  log "Removing k9s..."
+
+  sudo rm -f /usr/local/bin/k9s || true
+  sudo rm -f /usr/bin/k9s || true
+  sudo rm -f /snap/bin/k9s || true
+  rm -rf "$HOME/.k9s" || true
+  rm -rf "$HOME/.config/k9s" || true
+}
+
+#############################
+# MISE CLEANUP
 #############################
 
 remove_mise() {
   log "Removing mise..."
-
   rm -rf "$HOME/.local/share/mise" || true
   rm -f "$HOME/.local/bin/mise" || true
+}
 
-  for f in "$HOME/.bashrc" "$HOME/.zshrc"; do
-    sed -i '/mise/d' "$f" || true
+#############################
+# REAL VERIFICATION (IMPORTANT PART)
+#############################
+
+verify_uninstall() {
+  log "Running REAL verification..."
+
+  echo ""
+  echo "=============================="
+  echo "🔍 BINARY CHECK"
+  echo "=============================="
+
+  for bin in "${BINARIES[@]}"; do
+    if command -v "$bin" >/dev/null 2>&1; then
+      fail "$bin STILL EXISTS at $(command -v $bin)"
+    else
+      ok "$bin removed"
+    fi
   done
+
+  echo ""
+  echo "=============================="
+  echo "🔍 KIND / DOCKER CHECK"
+  echo "=============================="
+
+  if sudo docker ps -a --format '{{.Names}}' | grep -q "kind"; then
+    fail "Kind containers STILL EXIST"
+  else
+    ok "No Kind containers found"
+  fi
+
+  echo ""
+  echo "=============================="
+  echo "🔍 KUBECONFIG CHECK"
+  echo "=============================="
+
+  if [ -d "$HOME/.kube" ]; then
+    fail "Kubeconfig STILL EXISTS"
+  else
+    ok "Kubeconfig removed"
+  fi
+
+  echo ""
+  echo "=============================="
+  echo "🔍 GO CHECK"
+  echo "=============================="
+
+  if command -v go >/dev/null 2>&1; then
+    fail "Go STILL INSTALLED"
+  else
+    ok "Go removed"
+  fi
+
+  echo ""
+  echo "=============================="
+  echo "🔍 K9s CHECK"
+  echo "=============================="
+
+  if command -v k9s >/dev/null 2>&1; then
+    fail "k9s STILL INSTALLED"
+  else
+    ok "k9s removed"
+  fi
+
+  echo ""
+  echo "=============================="
+  echo "🎉 FINAL RESULT"
+  echo "=============================="
+
+  echo "✔ SYSTEM IS CLEAN"
 }
 
 #############################
@@ -149,26 +198,17 @@ remove_mise() {
 #############################
 
 main() {
-  log "💣 Starting FULL lab teardown"
+  log "💣 FULL LAB PRUNE STARTING"
 
-  delete_clusters
-  clean_docker
-  clean_kubectl
+  delete_kind
+  clean_kubeconfig
   clean_hosts
   remove_binaries
+  remove_k9s
   remove_go
   remove_mise
 
-  log ""
-  log "✅ COMPLETE WIPE FINISHED"
-  log ""
-  log "Verify:"
-  log "  kind get clusters"
-  log "  kubectl version"
-  log "  helm version"
-  log "  argocd version"
-  log "  go version"
-  log "  docker ps -a"
+  verify_uninstall
 }
 
 main
