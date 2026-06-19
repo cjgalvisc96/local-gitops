@@ -1,0 +1,13 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  repo: https://dl.gitea.com/charts
+  chart: gitea
+  targetNamespace: gitea
+  set:
+    service.type: ClusterIP
+    gitea.admin.username: admin
+    gitea.admin.password: adminadmin1

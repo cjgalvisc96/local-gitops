@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: apps
+  namespace: argocd
+spec:
+  generators:
+    - clusters: {}
+
+  template:
+    metadata:
+      name: "{{name}}-apps"
+    spec:
+      project: default
+
+      source:
+        repoURL: http://gitea-http.gitea.svc.cluster.local
+        targetRevision: HEAD
+        path: apps/{{name}}
+
+      destination:
+        server: "{{server}}"
+        namespace: apps
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

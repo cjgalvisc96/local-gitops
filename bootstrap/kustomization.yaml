@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespaces.yaml
+  - rbac-k8s.yaml
+  - metallb
+  - ingress-nginx.yaml
