@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: nginx
+  name: multi-cluster
   namespace: argocd
 spec:
   generators:
@@ -9,19 +9,19 @@ spec:
 
   template:
     metadata:
-      name: "{{name}}-nginx"
+      name: "{{name}}-app"
 
     spec:
       project: default
 
       source:
-        repoURL: http://gitea-http.gitea.svc.cluster.local
+        repoURL: http://gitea.gitea.svc.cluster.local:3000
         targetRevision: HEAD
-        path: nginx/overlays/{{name}}
+        path: apps/{{name}}
 
       destination:
         server: "{{server}}"
-        namespace: nginx
+        namespace: dev-app
 
       syncPolicy:
         automated:

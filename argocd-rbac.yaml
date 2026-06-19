@@ -9,11 +9,3 @@ data:
   policy.csv: |
     p, role:admin, applications, *, */*, allow
     p, role:admin, clusters, *, *, allow
-
-    p, role:dev, applications, get, dev/*, allow
-    p, role:dev, applications, sync, dev/*, allow
-
-    p, role:prod, applications, get, prod/*, allow
-
-    g, dev-user, role:dev
-    g, prod-user, role:prod

@@ -1,76 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-#############################
-# VERSION CONSTANTS
-#############################
-
-K8S_VERSION="v1.36.1"
-INGRESS_NGINX_VERSION="v1.11.2"
-
-ARGO_CD_CHART_VERSION="7.7.0"
-GITEA_CHART_VERSION="10.6.0"
-
-HELM_REPO_ARGO="https://argoproj.github.io/argo-helm"
-HELM_REPO_GITEA="https://dl.gitea.com/charts"
-
-#############################
-# CLUSTERS
-#############################
-
-DEV_CLUSTER="kind-local-dev"
-PROD_CLUSTER="kind-local-prod"
-
-ARGO_NS="argocd"
-GITEA_NS="gitea"
-NGINX_NS="ingress-nginx"
-DEV_APP_NS="dev-app"
-PROD_APP_NS="prod-app"
-
-ARGO_GITEA_USER="admin"
-ARGO_GITEA_PASSWORD="adminadmin1"
-
-INGRESS_YAML="https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml"
-
-#############################
-# LOGGING
-#############################
+DEV_CTX="kind-local-dev"
+PROD_CTX="kind-local-prod"
 
 log() { echo "[INFO] $*"; }
 
 #############################
-# HOST IP (CRITICAL FIX)
-#############################
-
-get_host_ip() {
-  ip route get 1.1.1.1 | awk '{print $7; exit}'
-}
-
-#############################
-# TOOLING (ASSUMED GLOBAL OK)
+# TOOLING
 #############################
 
 install_tools() {
-  log "Installing kubectl..."
-  curl -sSL "https://dl.k8s.io/release/${K8S_VERSION}/bin/linux/amd64/kubectl" -o /tmp/kubectl
+  log "Installing tools..."
+
+  curl -sSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o /tmp/kubectl
   sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
 
-  log "Installing kind..."
   curl -sSL https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64 -o /tmp/kind
   sudo install -m 0755 /tmp/kind /usr/local/bin/kind
 
-  log "Installing helm..."
   curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-  log "Installing argocd CLI..."
-  curl -sSL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /tmp/argocd
-  sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
-
-  log "Installing k9s..."
-  K9S_VERSION=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep tag_name | cut -d '"' -f4)
-  curl -sSL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" -o /tmp/k9s.tgz
+  curl -sSL https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_amd64.tar.gz -o /tmp/k9s.tgz
   tar -xzf /tmp/k9s.tgz -C /tmp
   sudo install -m 0755 /tmp/k9s /usr/local/bin/k9s
+
+  curl -sSL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /tmp/argocd
+  sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
 }
 
 #############################
@@ -78,42 +34,33 @@ install_tools() {
 #############################
 
 create_clusters() {
-  for c in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
-    kind get clusters | grep -q "$c" || \
-      kind create cluster --name "$c" --image "kindest/node:${K8S_VERSION}"
-  done
+  log "Creating clusters..."
+
+  kind create cluster --name local-dev || true
+  kind create cluster --name local-prod || true
+
+  kubectl config use-context "$DEV_CTX"
+}
+
+wait_for_nodes() {
+  log "Waiting for nodes..."
+  kubectl wait --for=condition=Ready nodes --all --timeout=300s
 }
 
 #############################
-# INGRESS
+# FIX TAINTS (SAFE)
 #############################
 
-install_ingress() {
-  for c in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
-    kubectl config use-context "kind-$c"
+fix_taints() {
+  log "Removing control-plane taints (if any)..."
 
-    kubectl apply -f "$INGRESS_YAML"
-
-    kubectl wait -n ingress-nginx \
-      --for=condition=available deployment/ingress-nginx-controller \
-      --timeout=300s || true
-
-    kubectl delete validatingwebhookconfiguration ingress-nginx-admission || true
+  for node in $(kubectl get nodes -o name); do
+    kubectl taint "$node" node-role.kubernetes.io/control-plane- || true
+    kubectl taint "$node" node-role.kubernetes.io/master- || true
   done
-}
 
-#############################
-# NAMESPACES (FIXED)
-#############################
-
-create_namespaces() {
-  kubectl config use-context "kind-$DEV_CLUSTER"
-
-  kubectl create ns "$ARGO_NS" --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create ns "$GITEA_NS" --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create ns "$NGINX_NS" --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create ns "$DEV_APP_NS" --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create ns "$PROD_APP_NS" --dry-run=client -o yaml | kubectl apply -f -
+  log "Labeling nodes for ingress..."
+  kubectl label nodes --all ingress-ready=true --overwrite || true
 }
 
 #############################
@@ -121,93 +68,141 @@ create_namespaces() {
 #############################
 
 setup_helm() {
-  helm repo list | grep -q argo || helm repo add argo "$HELM_REPO_ARGO"
-  helm repo list | grep -q gitea || helm repo add gitea "$HELM_REPO_GITEA"
+  log "Setting Helm repos..."
+
+  helm repo list | grep -q "^argo " || \
+    helm repo add argo https://argoproj.github.io/argo-helm
+
+  helm repo list | grep -q "^gitea " || \
+    helm repo add gitea https://dl.gitea.com/charts
+
   helm repo update
 }
 
 #############################
-# PLATFORM
+# WAIT FOR DEPLOYMENT (FIXED BUG)
+#############################
+
+wait_for_rollout() {
+  local deployment="$1"
+  local ns="$2"
+
+  kubectl rollout status deployment/"$deployment" -n "$ns" --timeout=300s
+}
+
+wait_for_webhook() {
+  log "Waiting for ingress-nginx webhook..."
+
+  for i in {1..60}; do
+    kubectl get endpoints -n ingress-nginx ingress-nginx-controller-admission >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+
+  echo "[ERROR] ingress webhook not ready"
+  exit 1
+}
+
+#############################
+# INGRESS (CRITICAL ORDER)
+#############################
+
+install_ingress() {
+  kubectl config use-context "$DEV_CTX"
+
+  log "Installing ingress-nginx..."
+
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.2/deploy/static/provider/kind/deploy.yaml
+
+  wait_for_rollout ingress-nginx-controller ingress-nginx
+  wait_for_webhook
+}
+
+#############################
+# METALLB
+#############################
+
+install_metallb() {
+  kubectl config use-context "$DEV_CTX"
+
+  log "Installing MetalLB..."
+
+  kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.5/config/manifests/metallb-native.yaml
+}
+
+#############################
+# PLATFORM (ARGO + GITEA)
 #############################
 
 install_platform() {
-  kubectl config use-context "kind-$DEV_CLUSTER"
+  kubectl config use-context "$DEV_CTX"
 
   setup_helm
 
   log "Installing Argo CD..."
   helm upgrade --install argocd argo/argo-cd \
-    -n "$ARGO_NS" \
-    --version "$ARGO_CD_CHART_VERSION" \
+    -n argocd --create-namespace \
     -f argocd-values.yaml
+
+  wait_for_rollout argocd-server argocd
 
   log "Installing Gitea..."
   helm upgrade --install gitea gitea/gitea \
-    -n "$GITEA_NS" \
-    --version "$GITEA_CHART_VERSION" \
+    -n gitea --create-namespace \
     -f gitea-values.yaml
+
+  wait_for_rollout gitea gitea
 }
 
 #############################
-# DNS FIX (CRITICAL)
+# GITOPS
 #############################
 
-setup_dns() {
-  local ip
-  ip=$(get_host_ip)
+apply_gitops() {
+  kubectl config use-context "$DEV_CTX"
 
-  log "Updating /etc/hosts -> $ip"
-
-  sudo sed -i '/argo.dev.local/d' /etc/hosts || true
-  sudo sed -i '/gitea.dev.local/d' /etc/hosts || true
-  sudo sed -i '/app.dev.local/d' /etc/hosts || true
-  sudo sed -i '/app.prod.local/d' /etc/hosts || true
-
-  echo "$ip argo.dev.local gitea.dev.local app.dev.local app.prod.local" | sudo tee -a /etc/hosts >/dev/null
+  kubectl apply -f argocd-rbac.yaml
+  kubectl apply -f rbac-k8s.yaml
+  kubectl apply -f applicationset.yaml
 }
 
 #############################
-# VERIFY
+# OUTPUT
 #############################
 
-verify() {
-  log "Cluster status:"
-  kubectl get nodes -A || true
-
-  log "Namespaces:"
-  kubectl get ns
-
-  log "Ingress:"
-  kubectl get ingress -A || true
-}
-
-#############################
-# MAIN
-#############################
-
-main() {
-  log "🚀 FULL CLEAN INSTALL"
-
-  install_tools
-  create_clusters
-  install_ingress
-  create_namespaces
-  install_platform
-  setup_dns
-  verify
-
-  local ip
-  ip=$(get_host_ip)
-
+print_urls() {
   echo ""
-  log "🌐 ACCESS URLS"
-  echo "--------------------------------"
+  echo "======================================"
+  echo "🚀 LOCAL GITOPS PLATFORM READY"
+  echo "======================================"
   echo "Argo CD : http://argo.dev.local"
   echo "Gitea   : http://gitea.dev.local"
   echo "Dev App : http://app.dev.local"
   echo "Prod App: http://app.prod.local"
-  echo "--------------------------------"
-  echo "Host IP: $ip"
+  echo "======================================"
+}
+
+#############################
+# MAIN (STRICT ORDER = NO RACE CONDITIONS)
+#############################
+
+main() {
+  log "🚀 STARTING STABLE BOOTSTRAP"
+
+  install_tools
+
+  create_clusters
+  wait_for_nodes
+
+  fix_taints
+
+  install_ingress
+  install_metallb
+
+  install_platform
+
+  apply_gitops
+
+  print_urls
 }
 
 main
