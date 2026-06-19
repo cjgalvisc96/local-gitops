@@ -1,7 +1,15 @@
 service:
   http:
-    type: NodePort
-    nodePort: 30030
+    type: ClusterIP
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: gitea.dev.local
+      paths:
+        - path: /
+          pathType: Prefix
 
 gitea:
   admin:

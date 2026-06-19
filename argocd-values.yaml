@@ -1,8 +1,10 @@
 server:
-  service:
-    type: NodePort
-    nodePortHttp: 30080
-    nodePortHttps: 30443
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - argocd.dev.local
+
   extraArgs:
     - --insecure
 

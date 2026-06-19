@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: nginx
+  namespace: argocd
+spec:
+  generators:
+    - clusters: {}
+
+  template:
+    metadata:
+      name: "{{name}}-nginx"
+    spec:
+      project: default
+
+      source:
+        repoURL: http://gitea-http.gitea.svc.cluster.local:3000/admin/local-nginx.git
+        targetRevision: HEAD
+        path: nginx/overlays/{{name}}
+
+      destination:
+        server: "{{server}}"
+        namespace: nginx
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
