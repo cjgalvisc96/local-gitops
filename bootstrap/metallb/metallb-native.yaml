@@ -1,5 +1,14 @@
-apiVersion: metallb.io/v1beta1
-kind: L2Advertisement
+apiVersion: v1
+kind: Namespace
 metadata:
-  name: l2
+  name: metallb-system
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: metallb
   namespace: metallb-system
+spec:
+  repo: https://metallb.github.io/metallb
+  chart: metallb
+  targetNamespace: metallb-system

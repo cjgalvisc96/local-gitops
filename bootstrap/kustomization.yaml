@@ -3,6 +3,10 @@ kind: Kustomization
 
 resources:
   - namespaces.yaml
-  - rbac-k8s.yaml
-  - metallb
   - ingress-nginx.yaml
+  - metallb/metallb-native.yaml
+  - metallb/metallb-pool.yaml
+  - argocd/argocd-rbac.yaml
+  - argocd/ingress.yaml
+  - gitops/rbac-k8s.yaml
+  - gitops/applicationset.yaml
