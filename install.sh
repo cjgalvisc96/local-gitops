@@ -23,11 +23,14 @@ PROD_CLUSTER="kind-local-prod"
 
 ARGO_NS="argocd"
 GITEA_NS="gitea"
+NGINX_NS="ingress-nginx"
+DEV_APP_NS="dev-app"
+PROD_APP_NS="prod-app"
 
 ARGO_GITEA_USER="admin"
 ARGO_GITEA_PASSWORD="adminadmin1"
 
-INGRESS_YAML_BASE="https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml"
+INGRESS_YAML="https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml"
 
 #############################
 # LOGGING
@@ -36,117 +39,90 @@ INGRESS_YAML_BASE="https://raw.githubusercontent.com/kubernetes/ingress-nginx/co
 log() { echo "[INFO] $*"; }
 
 #############################
-# TEMP HELPERS (NO LOCAL FILES)
+# HOST IP (CRITICAL FIX)
 #############################
 
-safe_download() {
-  curl -sSL "$1" -o "/tmp/$2"
-}
-
-safe_install_bin() {
-  sudo install -m 0755 "/tmp/$1" "/usr/local/bin/$2"
-  rm -f "/tmp/$1"
+get_host_ip() {
+  ip route get 1.1.1.1 | awk '{print $7; exit}'
 }
 
 #############################
-# GLOBAL TOOLCHAIN
+# TOOLING (ASSUMED GLOBAL OK)
 #############################
 
-install_tools_global() {
+install_tools() {
+  log "Installing kubectl..."
+  curl -sSL "https://dl.k8s.io/release/${K8S_VERSION}/bin/linux/amd64/kubectl" -o /tmp/kubectl
+  sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
 
-  log "Installing global Kubernetes toolchain..."
+  log "Installing kind..."
+  curl -sSL https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64 -o /tmp/kind
+  sudo install -m 0755 /tmp/kind /usr/local/bin/kind
 
-  # kubectl
-  if ! command -v kubectl >/dev/null; then
-    log "Installing kubectl..."
-    safe_download "https://dl.k8s.io/release/${K8S_VERSION}/bin/linux/amd64/kubectl" "kubectl"
-    safe_install_bin "kubectl" "kubectl"
-  fi
+  log "Installing helm..."
+  curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-  # kind
-  if ! command -v kind >/dev/null; then
-    log "Installing kind..."
-    safe_download "https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64" "kind"
-    safe_install_bin "kind" "kind"
-  fi
+  log "Installing argocd CLI..."
+  curl -sSL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /tmp/argocd
+  sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
 
-  # helm
-  if ! command -v helm >/dev/null; then
-    log "Installing helm..."
-    curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-  fi
-
-  # argocd CLI
-  if ! command -v argocd >/dev/null; then
-    log "Installing argocd CLI..."
-    safe_download "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64" "argocd"
-    safe_install_bin "argocd" "argocd"
-  fi
-
-  # k9s
-  if ! command -v k9s >/dev/null; then
-    log "Installing k9s..."
-    K9S_VERSION=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep tag_name | cut -d '"' -f4)
-
-    safe_download \
-      "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" \
-      "k9s.tar.gz"
-
-    tar -xzf /tmp/k9s.tar.gz -C /tmp
-    sudo install -m 0755 /tmp/k9s /usr/local/bin/k9s
-    rm -f /tmp/k9s /tmp/k9s.tar.gz
-  fi
+  log "Installing k9s..."
+  K9S_VERSION=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep tag_name | cut -d '"' -f4)
+  curl -sSL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" -o /tmp/k9s.tgz
+  tar -xzf /tmp/k9s.tgz -C /tmp
+  sudo install -m 0755 /tmp/k9s /usr/local/bin/k9s
 }
 
 #############################
 # CLUSTERS
 #############################
 
-create_cluster() {
-  local name="$1"
-
-  if kind get clusters | grep -q "^$name$"; then
-    log "Cluster $name already exists"
-  else
-    log "Creating cluster $name..."
-    kind create cluster --name "$name" --image "kindest/node:${K8S_VERSION}"
-  fi
-}
-
 create_clusters() {
-  create_cluster "$DEV_CLUSTER"
-  create_cluster "$PROD_CLUSTER"
+  for c in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
+    kind get clusters | grep -q "$c" || \
+      kind create cluster --name "$c" --image "kindest/node:${K8S_VERSION}"
+  done
 }
 
 #############################
-# INGRESS (FIXED)
+# INGRESS
 #############################
 
 install_ingress() {
-  for CLUSTER in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
-    log "Installing ingress on $CLUSTER..."
+  for c in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
+    kubectl config use-context "kind-$c"
 
-    kubectl config use-context "kind-$CLUSTER"
-    kubectl apply -f "$INGRESS_YAML_BASE"
+    kubectl apply -f "$INGRESS_YAML"
 
     kubectl wait -n ingress-nginx \
       --for=condition=available deployment/ingress-nginx-controller \
       --timeout=300s || true
 
-    # 🔥 IMPORTANT FIX FOR LOCAL LABS
     kubectl delete validatingwebhookconfiguration ingress-nginx-admission || true
-
-    sleep 15
   done
 }
 
 #############################
-# HELM SETUP
+# NAMESPACES (FIXED)
 #############################
 
-setup_helm_repos() {
-  helm repo list | grep -q "^argo" || helm repo add argo "$HELM_REPO_ARGO"
-  helm repo list | grep -q "^gitea" || helm repo add gitea "$HELM_REPO_GITEA"
+create_namespaces() {
+  kubectl config use-context "kind-$DEV_CLUSTER"
+
+  kubectl create ns "$ARGO_NS" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create ns "$GITEA_NS" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create ns "$NGINX_NS" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create ns "$DEV_APP_NS" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create ns "$PROD_APP_NS" --dry-run=client -o yaml | kubectl apply -f -
+}
+
+#############################
+# HELM
+#############################
+
+setup_helm() {
+  helm repo list | grep -q argo || helm repo add argo "$HELM_REPO_ARGO"
+  helm repo list | grep -q gitea || helm repo add gitea "$HELM_REPO_GITEA"
   helm repo update
 }
 
@@ -157,19 +133,13 @@ setup_helm_repos() {
 install_platform() {
   kubectl config use-context "kind-$DEV_CLUSTER"
 
-  kubectl create ns "$ARGO_NS" --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create ns "$GITEA_NS" --dry-run=client -o yaml | kubectl apply -f -
-
-  setup_helm_repos
+  setup_helm
 
   log "Installing Argo CD..."
   helm upgrade --install argocd argo/argo-cd \
     -n "$ARGO_NS" \
     --version "$ARGO_CD_CHART_VERSION" \
-    -f argocd-values.yaml \
-    --set server.service.type=NodePort \
-    --set server.extraArgs="{--insecure}" \
-    --set configs.params."server\.insecure"=true
+    -f argocd-values.yaml
 
   log "Installing Gitea..."
   helm upgrade --install gitea gitea/gitea \
@@ -179,88 +149,36 @@ install_platform() {
 }
 
 #############################
-# NETWORK HELPERS
-#############################
-
-get_kind_ip() {
-  docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1-control-plane"
-}
-
-get_nodeport() {
-  kubectl get svc argocd-server -n "$ARGO_NS" \
-    -o jsonpath='{.spec.ports[0].nodePort}'
-}
-
-#############################
-# REGISTER CLUSTERS
-#############################
-
-register_clusters() {
-  kubectl config use-context "kind-$DEV_CLUSTER"
-
-  ARGO_IP=$(get_kind_ip "$DEV_CLUSTER")
-  ARGO_PORT=$(get_nodeport)
-
-  ARGO_URL="http://${ARGO_IP}:${ARGO_PORT}"
-
-  log "Argo CD URL: $ARGO_URL"
-
-  argocd login "$ARGO_URL" \
-    --username "$ARGO_GITEA_USER" \
-    --password "$ARGO_GITEA_PASSWORD" \
-    --insecure || true
-
-  argocd cluster add "kind-$DEV_CLUSTER" --yes || true
-  argocd cluster add "kind-$PROD_CLUSTER" --yes || true
-}
-
-#############################
-# GITOPS
-#############################
-
-apply_gitops() {
-  kubectl config use-context "kind-$DEV_CLUSTER"
-
-  kubectl apply -f applicationset.yaml || true
-  kubectl apply -f argocd-rbac.yaml || true
-  kubectl apply -f rbac-k8s.yaml || true
-}
-
-#############################
-# DNS
+# DNS FIX (CRITICAL)
 #############################
 
 setup_dns() {
-  local hosts="127.0.0.1 argocd.dev.local gitea.dev.local app.dev.local app.prod.local"
+  local ip
+  ip=$(get_host_ip)
 
-  grep -q "argocd.dev.local" /etc/hosts 2>/dev/null || \
-    echo "$hosts" | sudo tee -a /etc/hosts >/dev/null
+  log "Updating /etc/hosts -> $ip"
+
+  sudo sed -i '/argo.dev.local/d' /etc/hosts || true
+  sudo sed -i '/gitea.dev.local/d' /etc/hosts || true
+  sudo sed -i '/app.dev.local/d' /etc/hosts || true
+  sudo sed -i '/app.prod.local/d' /etc/hosts || true
+
+  echo "$ip argo.dev.local gitea.dev.local app.dev.local app.prod.local" | sudo tee -a /etc/hosts >/dev/null
 }
 
 #############################
-# FINAL OUTPUT
+# VERIFY
 #############################
 
-print_urls() {
-  local ip
-  ip=$(get_kind_ip "$DEV_CLUSTER")
+verify() {
+  log "Cluster status:"
+  kubectl get nodes -A || true
 
-  local port
-  port=$(get_nodeport)
+  log "Namespaces:"
+  kubectl get ns
 
-  echo ""
-  log "🌐 ACCESS URLS"
-  echo "----------------------------------"
-  log "Argo CD:  http://${ip}:${port}"
-  log "Gitea:    http://gitea.dev.local"
-  log "Dev App:  http://app.dev.local"
-  log "Prod App: http://app.prod.local"
-  echo "----------------------------------"
-  echo ""
-
-  log "🔐 Credentials"
-  log "User: $ARGO_GITEA_USER"
-  log "Pass: $ARGO_GITEA_PASSWORD"
+  log "Ingress:"
+  kubectl get ingress -A || true
 }
 
 #############################
@@ -268,19 +186,28 @@ print_urls() {
 #############################
 
 main() {
-  log "🚀 Starting full GitOps platform bootstrap"
+  log "🚀 FULL CLEAN INSTALL"
 
-  install_tools_global
+  install_tools
   create_clusters
   install_ingress
+  create_namespaces
   install_platform
-  register_clusters
-  apply_gitops
   setup_dns
+  verify
 
-  print_urls
+  local ip
+  ip=$(get_host_ip)
 
-  log "✅ COMPLETE"
+  echo ""
+  log "🌐 ACCESS URLS"
+  echo "--------------------------------"
+  echo "Argo CD : http://argo.dev.local"
+  echo "Gitea   : http://gitea.dev.local"
+  echo "Dev App : http://app.dev.local"
+  echo "Prod App: http://app.prod.local"
+  echo "--------------------------------"
+  echo "Host IP: $ip"
 }
 
 main

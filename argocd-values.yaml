@@ -3,12 +3,16 @@ server:
     enabled: true
     ingressClassName: nginx
     hosts:
-      - argocd.dev.local
+      - argo.dev.local
+    paths:
+      - /
 
   extraArgs:
     - --insecure
 
+  service:
+    type: ClusterIP
+
 configs:
-  secret:
-    argocdServerAdminPassword: "$2a$10$ix86nMMaA.YgKNfWFK7NZOh33T8tocnhKfnGpIzKRniKRVMwz/J0u"
-    argocdServerAdminPasswordMtime: "2026-06-18T00:00:00Z"
+  params:
+    server.insecure: true

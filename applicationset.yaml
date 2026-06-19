@@ -10,11 +10,12 @@ spec:
   template:
     metadata:
       name: "{{name}}-nginx"
+
     spec:
       project: default
 
       source:
-        repoURL: http://gitea-http.gitea.svc.cluster.local:3000/admin/local-nginx.git
+        repoURL: http://gitea-http.gitea.svc.cluster.local
         targetRevision: HEAD
         path: nginx/overlays/{{name}}
 

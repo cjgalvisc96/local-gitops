@@ -1,6 +1,0 @@
-[tools]
-go = "1.26.4"           # ✅ Latest, all compatible
-kubectl = "1.36.1"      # ✅ Latest, compatible with all
-helm = "4.2.1"          # ⚠️ Major upgrade - test charts first
-argocd = "3.4.4"        # ⚠️ Major upgrade - backup & update ApplicationSets
-kind = "0.32.0"         # ✅ Latest
