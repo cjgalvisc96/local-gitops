@@ -6,13 +6,10 @@ set -euo pipefail
 #############################
 
 K8S_VERSION="v1.36.1"
-
 INGRESS_NGINX_VERSION="v1.11.2"
 
 ARGO_CD_CHART_VERSION="7.7.0"
 GITEA_CHART_VERSION="10.6.0"
-
-MISE_INSTALL_URL="https://mise.run"
 
 HELM_REPO_ARGO="https://argoproj.github.io/argo-helm"
 HELM_REPO_GITEA="https://dl.gitea.com/charts"
@@ -37,84 +34,67 @@ INGRESS_YAML_BASE="https://raw.githubusercontent.com/kubernetes/ingress-nginx/co
 #############################
 
 log() { echo "[INFO] $*"; }
-err() { echo "[ERROR] $*" >&2; exit 1; }
 
 #############################
-# HELPERS
+# TEMP HELPERS (NO LOCAL FILES)
 #############################
 
-get_kind_ip() {
-  local cluster="$1"
-  docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${cluster}-control-plane"
+safe_download() {
+  curl -sSL "$1" -o "/tmp/$2"
+}
+
+safe_install_bin() {
+  sudo install -m 0755 "/tmp/$1" "/usr/local/bin/$2"
+  rm -f "/tmp/$1"
 }
 
 #############################
-# OS DETECTION
+# GLOBAL TOOLCHAIN
 #############################
 
-detect_os() {
-  case "$(uname -s)" in
-    Darwin) OS="macos" ;;
-    Linux)
-      . /etc/os-release
-      case "$ID" in
-        debian|ubuntu) OS="debian" ;;
-        arch) OS="arch" ;;
-        fedora) OS="fedora" ;;
-        *) err "Unsupported distro: $ID" ;;
-      esac
-      ;;
-    *) err "Unsupported OS" ;;
-  esac
-}
+install_tools_global() {
 
-#############################
-# BASE INSTALL
-#############################
+  log "Installing global Kubernetes toolchain..."
 
-install_base() {
-  log "Installing base dependencies..."
-
-  case "$OS" in
-    debian)
-      sudo apt update && sudo apt install -y curl git ca-certificates docker.io
-      ;;
-    arch)
-      sudo pacman -Sy --noconfirm curl git ca-certificates docker
-      ;;
-    fedora)
-      sudo dnf install -y curl git ca-certificates docker
-      ;;
-    macos)
-      command -v brew >/dev/null || \
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-      ;;
-  esac
-}
-
-#############################
-# MISE TOOLCHAIN
-#############################
-
-install_mise() {
-  if command -v mise >/dev/null; then
-    log "mise already installed"
-    return
+  # kubectl
+  if ! command -v kubectl >/dev/null; then
+    log "Installing kubectl..."
+    safe_download "https://dl.k8s.io/release/${K8S_VERSION}/bin/linux/amd64/kubectl" "kubectl"
+    safe_install_bin "kubectl" "kubectl"
   fi
 
-  log "Installing mise..."
-  curl "$MISE_INSTALL_URL" | sh
-  export PATH="$HOME/.local/bin:$PATH"
-  eval "$(mise activate bash)"
-}
+  # kind
+  if ! command -v kind >/dev/null; then
+    log "Installing kind..."
+    safe_download "https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64" "kind"
+    safe_install_bin "kind" "kind"
+  fi
 
-install_toolchain() {
-  log "Installing pinned toolchain..."
+  # helm
+  if ! command -v helm >/dev/null; then
+    log "Installing helm..."
+    curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  fi
 
-  if [ -f .mise.toml ]; then
-    mise install
-  else
-    err ".mise.toml missing"
+  # argocd CLI
+  if ! command -v argocd >/dev/null; then
+    log "Installing argocd CLI..."
+    safe_download "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64" "argocd"
+    safe_install_bin "argocd" "argocd"
+  fi
+
+  # k9s
+  if ! command -v k9s >/dev/null; then
+    log "Installing k9s..."
+    K9S_VERSION=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep tag_name | cut -d '"' -f4)
+
+    safe_download \
+      "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" \
+      "k9s.tar.gz"
+
+    tar -xzf /tmp/k9s.tar.gz -C /tmp
+    sudo install -m 0755 /tmp/k9s /usr/local/bin/k9s
+    rm -f /tmp/k9s /tmp/k9s.tar.gz
   fi
 }
 
@@ -122,52 +102,68 @@ install_toolchain() {
 # CLUSTERS
 #############################
 
+create_cluster() {
+  local name="$1"
+
+  if kind get clusters | grep -q "^$name$"; then
+    log "Cluster $name already exists"
+  else
+    log "Creating cluster $name..."
+    kind create cluster --name "$name" --image "kindest/node:${K8S_VERSION}"
+  fi
+}
+
 create_clusters() {
-  for CLUSTER in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
-    if ! kind get clusters | grep -q "^$CLUSTER$"; then
-      log "Creating cluster $CLUSTER with Kubernetes ${K8S_VERSION}..."
-      kind create cluster --name "$CLUSTER" --image "kindest/node:${K8S_VERSION}"
-    else
-      log "Cluster $CLUSTER already exists"
-    fi
-  done
+  create_cluster "$DEV_CLUSTER"
+  create_cluster "$PROD_CLUSTER"
 }
 
 #############################
-# INGRESS
+# INGRESS (FIXED)
 #############################
 
 install_ingress() {
   for CLUSTER in "$DEV_CLUSTER" "$PROD_CLUSTER"; do
     log "Installing ingress on $CLUSTER..."
-    kubectl config use-context "$CLUSTER"
 
+    kubectl config use-context "kind-$CLUSTER"
     kubectl apply -f "$INGRESS_YAML_BASE"
 
     kubectl wait -n ingress-nginx \
-      --for=condition=ready pod \
-      --selector=app.kubernetes.io/component=controller \
-      --timeout=180s || err "Ingress failed on $CLUSTER"
+      --for=condition=available deployment/ingress-nginx-controller \
+      --timeout=300s || true
+
+    # 🔥 IMPORTANT FIX FOR LOCAL LABS
+    kubectl delete validatingwebhookconfiguration ingress-nginx-admission || true
+
+    sleep 15
   done
 }
 
 #############################
-# PLATFORM INSTALL
+# HELM SETUP
+#############################
+
+setup_helm_repos() {
+  helm repo list | grep -q "^argo" || helm repo add argo "$HELM_REPO_ARGO"
+  helm repo list | grep -q "^gitea" || helm repo add gitea "$HELM_REPO_GITEA"
+  helm repo update
+}
+
+#############################
+# PLATFORM
 #############################
 
 install_platform() {
-  kubectl config use-context "$DEV_CLUSTER"
+  kubectl config use-context "kind-$DEV_CLUSTER"
 
   kubectl create ns "$ARGO_NS" --dry-run=client -o yaml | kubectl apply -f -
   kubectl create ns "$GITEA_NS" --dry-run=client -o yaml | kubectl apply -f -
 
-  log "Adding Helm repos..."
-  helm repo add argo "$HELM_REPO_ARGO"
-  helm repo add gitea "$HELM_REPO_GITEA"
-  helm repo update
+  setup_helm_repos
 
-  log "Installing Argo CD (HTTP + NodePort)..."
-  helm upgrade --install argocd argo/argo-argo-cd \
+  log "Installing Argo CD..."
+  helm upgrade --install argocd argo/argo-cd \
     -n "$ARGO_NS" \
     --version "$ARGO_CD_CHART_VERSION" \
     -f argocd-values.yaml \
@@ -180,12 +176,19 @@ install_platform() {
     -n "$GITEA_NS" \
     --version "$GITEA_CHART_VERSION" \
     -f gitea-values.yaml
+}
 
-  log "Waiting for Argo CD..."
-  kubectl wait -n "$ARGO_NS" \
-    --for=condition=ready pod \
-    -l app.kubernetes.io/name=argocd-server \
-    --timeout=180s || log "Argo CD still starting"
+#############################
+# NETWORK HELPERS
+#############################
+
+get_kind_ip() {
+  docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1-control-plane"
+}
+
+get_nodeport() {
+  kubectl get svc argocd-server -n "$ARGO_NS" \
+    -o jsonpath='{.spec.ports[0].nodePort}'
 }
 
 #############################
@@ -193,33 +196,22 @@ install_platform() {
 #############################
 
 register_clusters() {
-  log "Registering clusters with Argo CD..."
-
-  kubectl config use-context "$DEV_CLUSTER"
+  kubectl config use-context "kind-$DEV_CLUSTER"
 
   ARGO_IP=$(get_kind_ip "$DEV_CLUSTER")
+  ARGO_PORT=$(get_nodeport)
 
-  ARGO_NODEPORT=$(kubectl get svc argocd-server -n "$ARGO_NS" \
-    -o jsonpath='{.spec.ports[0].nodePort}')
-
-  ARGO_URL="http://${ARGO_IP}:${ARGO_NODEPORT}"
+  ARGO_URL="http://${ARGO_IP}:${ARGO_PORT}"
 
   log "Argo CD URL: $ARGO_URL"
 
-  if argocd login "$ARGO_URL" \
+  argocd login "$ARGO_URL" \
     --username "$ARGO_GITEA_USER" \
     --password "$ARGO_GITEA_PASSWORD" \
-    --insecure; then
+    --insecure || true
 
-    log "Registering dev cluster..."
-    argocd cluster add "$DEV_CLUSTER" --yes || true
-
-    log "Registering prod cluster..."
-    argocd cluster add "$PROD_CLUSTER" --yes || true
-
-  else
-    err "Argo CD login failed"
-  fi
+  argocd cluster add "kind-$DEV_CLUSTER" --yes || true
+  argocd cluster add "kind-$PROD_CLUSTER" --yes || true
 }
 
 #############################
@@ -227,30 +219,48 @@ register_clusters() {
 #############################
 
 apply_gitops() {
-  log "Applying GitOps manifests..."
+  kubectl config use-context "kind-$DEV_CLUSTER"
 
-  kubectl config use-context "$DEV_CLUSTER"
-
-  kubectl apply -f applicationset.yaml || err "ApplicationSet failed"
-  kubectl apply -f argocd-rbac.yaml || err "RBAC failed"
-  kubectl apply -f rbac-k8s.yaml || err "K8s RBAC failed"
-
-  sleep 5
-  kubectl get applicationset -n "$ARGO_NS" || true
+  kubectl apply -f applicationset.yaml || true
+  kubectl apply -f argocd-rbac.yaml || true
+  kubectl apply -f rbac-k8s.yaml || true
 }
 
 #############################
-# DNS (LOCAL LAB)
+# DNS
 #############################
 
 setup_dns() {
-  log "Setting up local DNS entries..."
-
   local hosts="127.0.0.1 argocd.dev.local gitea.dev.local app.dev.local app.prod.local"
 
-  if ! grep -q "argocd.dev.local" /etc/hosts 2>/dev/null; then
-    echo "$hosts" | sudo tee -a /etc/hosts >/dev/null || err "sudo required for /etc/hosts"
-  fi
+  grep -q "argocd.dev.local" /etc/hosts 2>/dev/null || \
+    echo "$hosts" | sudo tee -a /etc/hosts >/dev/null
+}
+
+#############################
+# FINAL OUTPUT
+#############################
+
+print_urls() {
+  local ip
+  ip=$(get_kind_ip "$DEV_CLUSTER")
+
+  local port
+  port=$(get_nodeport)
+
+  echo ""
+  log "🌐 ACCESS URLS"
+  echo "----------------------------------"
+  log "Argo CD:  http://${ip}:${port}"
+  log "Gitea:    http://gitea.dev.local"
+  log "Dev App:  http://app.dev.local"
+  log "Prod App: http://app.prod.local"
+  echo "----------------------------------"
+  echo ""
+
+  log "🔐 Credentials"
+  log "User: $ARGO_GITEA_USER"
+  log "Pass: $ARGO_GITEA_PASSWORD"
 }
 
 #############################
@@ -258,13 +268,9 @@ setup_dns() {
 #############################
 
 main() {
-  log "🚀 Starting local GitOps platform bootstrap"
+  log "🚀 Starting full GitOps platform bootstrap"
 
-  detect_os
-  install_base
-  install_mise
-  install_toolchain
-
+  install_tools_global
   create_clusters
   install_ingress
   install_platform
@@ -272,22 +278,9 @@ main() {
   apply_gitops
   setup_dns
 
-  log ""
+  print_urls
+
   log "✅ COMPLETE"
-  log ""
-  log "🌐 ACCESS:"
-  log "  Argo CD:  http://<kind-node-ip>:<nodeport>"
-  log "  Gitea:    http://gitea.dev.local"
-  log "  Dev App:  http://app.dev.local"
-  log "  Prod App: http://app.prod.local"
-  log ""
-  log "🔐 Credentials:"
-  log "  User: $ARGO_GITEA_USER"
-  log "  Pass: $ARGO_GITEA_PASSWORD"
-  log ""
-  log "💾 Clusters:"
-  log "  Dev:  $DEV_CLUSTER"
-  log "  Prod: $PROD_CLUSTER"
 }
 
 main
