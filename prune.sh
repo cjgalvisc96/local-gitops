@@ -1,53 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-log() { echo "[NUKE] $*"; }
+log() { echo "[PRUNE] $*"; }
+
+DEV_CLUSTER="local-dev"
+PROD_CLUSTER="local-prod"
 
 HOSTS=("argo.dev.local" "gitea.dev.local" "app.dev.local" "app.prod.local")
 
 #############################
-# STOP PORT CONFLICTS
+# STOP SYSTEM SERVICES
 #############################
 
-stop_ports() {
-  log "Stopping port conflicts..."
-
+stop_services() {
+  log "Stopping conflicting services..."
   sudo fuser -k 80/tcp || true
   sudo fuser -k 443/tcp || true
-
   sudo systemctl stop apache2 || true
   sudo systemctl stop nginx || true
 }
 
 #############################
-# DELETE KIND PROPERLY
+# DELETE KIND CLUSTERS
 #############################
 
-delete_kind() {
-  log "Deleting Kind clusters (CLI)..."
+delete_clusters() {
+  log "Deleting kind clusters..."
 
-  kind delete cluster --name local-dev || true
-  kind delete cluster --name local-prod || true
+  kind delete cluster --name "$DEV_CLUSTER" || true
+  kind delete cluster --name "$PROD_CLUSTER" || true
 }
 
 #############################
-# FORCE CLEAN DOCKER (CRITICAL FIX)
+# CLEAN DOCKER
 #############################
 
 cleanup_docker() {
-  log "Removing Kind containers..."
+  log "Cleaning docker..."
 
-  docker ps -a --format '{{.ID}} {{.Names}}' \
-    | grep kind \
-    | awk '{print $1}' \
-    | xargs -r docker rm -f || true
-
-  log "Removing Kind networks..."
-
-  # ONLY remove kind networks AFTER containers are gone
-  docker network ls --format '{{.Name}}' \
-    | grep kind \
-    | xargs -r docker network rm || true
+  docker ps -a --format '{{.Names}}' | grep kind | xargs -r docker rm -f || true
+  docker network ls --format '{{.Name}}' | grep kind | xargs -r docker network rm || true
 }
 
 #############################
@@ -55,16 +47,16 @@ cleanup_docker() {
 #############################
 
 clean_kubeconfig() {
-  log "Cleaning kubeconfig..."
+  log "Removing kubeconfig..."
   rm -rf ~/.kube || true
 }
 
 #############################
-# CLEAN HOSTS
+# CLEAN /etc/hosts
 #############################
 
 clean_hosts() {
-  log "Cleaning /etc/hosts..."
+  log "Cleaning hosts..."
 
   for h in "${HOSTS[@]}"; do
     sudo sed -i "/$h/d" /etc/hosts || true
@@ -72,17 +64,46 @@ clean_hosts() {
 }
 
 #############################
+# REMOVE TOOLCHAIN
+#############################
+
+remove_tools() {
+  log "Removing installed tools..."
+
+  sudo rm -f /usr/local/bin/kubectl || true
+  sudo rm -f /usr/local/bin/kind || true
+  sudo rm -f /usr/local/bin/helm || true
+  sudo rm -f /usr/local/bin/argocd || true
+  sudo rm -f /usr/local/bin/k9s || true
+}
+
+#############################
+# VERIFY CLEAN STATE
+#############################
+
+verify() {
+  log "Verifying cleanup..."
+
+  command -v kubectl >/dev/null && echo "[WARN] kubectl still exists" || echo "[OK] kubectl removed"
+  command -v kind >/dev/null && echo "[WARN] kind still exists" || echo "[OK] kind removed"
+  command -v helm >/dev/null && echo "[WARN] helm still exists" || echo "[OK] helm removed"
+}
+
+#############################
 # MAIN
 #############################
 
 main() {
-  log "💣 FULL PRUNE START"
+  log "💣 FULL PLATFORM PRUNE START"
 
-  stop_ports
-  delete_kind
-  cleanup_docker   # 🔥 FIXED ORDER
+  stop_services
+  delete_clusters
+  cleanup_docker
   clean_kubeconfig
   clean_hosts
+  remove_tools
+
+  verify
 
   log "✔ PRUNE COMPLETE"
 }
