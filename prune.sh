@@ -50,6 +50,18 @@ prune_contexts() {
   done
 }
 
+prune_floci() {
+  require_cmd docker || return
+  step "Stopping floci (local AWS emulator)"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$FLOCI_CONTAINER"; then
+    docker rm -f "$FLOCI_CONTAINER" >/dev/null 2>&1 && log "removed floci container" || true
+  else
+    log "floci container not present"
+  fi
+  docker image inspect "$FLOCI_IMAGE" >/dev/null 2>&1 && docker rmi "$FLOCI_IMAGE" >/dev/null 2>&1 \
+    && log "removed floci image" || true
+}
+
 # Remove only the Docker artifacts install.sh created: kind node containers and
 # their volumes (matched by kind's per-cluster label), the shared kind network,
 # and the node image. Nothing else on the host's Docker is touched.
@@ -96,6 +108,7 @@ prune_tools() {
 main() {
   log "Pruning GitOps Enterprise Lab"
   prune_clusters
+  prune_floci
   prune_dns
   prune_contexts
   prune_docker

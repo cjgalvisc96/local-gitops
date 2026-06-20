@@ -83,10 +83,12 @@ systemd-resolved the installer falls back to an automated `/etc/hosts` block.
   kind apiserver cert SANs and reachable from management pods on the shared network.
 - **Management UI naming**: Gitea/Argo CD live on the management cluster but are
   aliased under `*.dev.local` / `*.prod.local` to match the URL list in the spec.
-- **floci (AWS)**: SSM Parameter Store is consumed via External Secrets Operator
-  pointed at floci (`host.docker.internal:4566`). Seeding is best-effort and
-  skipped if floci/`aws` CLI aren't present — see https://github.com/floci-io/floci.
-  ECR registry coordinates are surfaced in the platform ConfigMap.
+- **floci (AWS)**: `install.sh` starts floci (the local AWS emulator) as a Docker
+  container on `:4566`, seeds SSM parameters and ECR repos, and the External
+  Secrets Operator in each cluster pulls from it. Pods reach floci's
+  host-published port via the kind bridge gateway (`172.18.0.1:4566`); the host
+  seeds via `localhost:4566`. `prune.sh` stops and removes it. The AWS CLI is
+  auto-installed if missing. See https://github.com/floci-io/floci.
 - **Eventual consistency**: the `ClusterSecretStore`/`ExternalSecret` depend on
   ESO's CRDs (installed by a separate Application); Argo self-heal reconciles
   them once the operator is up.

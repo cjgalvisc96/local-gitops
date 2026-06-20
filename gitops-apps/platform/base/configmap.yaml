@@ -7,6 +7,7 @@ metadata:
 data:
   ENVIRONMENT: "unset"          # overridden per environment overlay
   AWS_REGION: "us-east-1"
-  # floci emulates AWS locally; in-cluster workloads reach it via the host gateway.
-  AWS_ENDPOINT_URL: "http://host.docker.internal:4566"
+  # floci emulates AWS locally; pods reach its host-published port via the kind
+  # bridge gateway (172.18.0.1).
+  AWS_ENDPOINT_URL: "http://172.18.0.1:4566"
   ECR_REGISTRY: "000000000000.dkr.ecr.us-east-1.amazonaws.com"

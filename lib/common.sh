@@ -40,7 +40,14 @@ export GITEA_ORG="gitops"
 export GITEA_REPOS=("platform-config" "gitops-apps")
 
 # floci (local AWS emulator) — https://github.com/floci-io/floci
-export FLOCI_ENDPOINT="${FLOCI_ENDPOINT:-http://host.docker.internal:4566}"
+export FLOCI_CONTAINER="floci"
+export FLOCI_IMAGE="floci/floci:latest"
+export FLOCI_PORT="4566"
+# Endpoint as seen from the host (install.sh seeding) ...
+export FLOCI_HOST_ENDPOINT="http://localhost:${FLOCI_PORT}"
+# ... and as seen from inside the kind clusters: floci's published port on the
+# host is reachable from pods via the kind bridge gateway (172.18.0.1).
+export FLOCI_CLUSTER_ENDPOINT="http://172.18.0.1:${FLOCI_PORT}"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 
 # Repo root (directory containing install.sh)

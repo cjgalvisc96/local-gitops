@@ -59,6 +59,40 @@ install_tools() {
     curl -sSLf "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-${os}-${arch}" -o /tmp/argocd
     sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
   fi
+  if ! require_cmd aws; then
+    if require_cmd unzip; then
+      log "installing AWS CLI v2 (for floci seeding)"
+      curl -sSLf "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
+      unzip -q -o /tmp/awscliv2.zip -d /tmp
+      sudo /tmp/aws/install --update
+    else
+      warn "aws CLI and unzip both missing; floci SSM/ECR seeding will be skipped"
+    fi
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# floci (local AWS) — start the emulator container
+# -----------------------------------------------------------------------------
+setup_floci() {
+  step "Setting up floci (local AWS emulator)"
+  if docker ps --format '{{.Names}}' | grep -qx "$FLOCI_CONTAINER"; then
+    log "floci already running"
+  else
+    docker rm -f "$FLOCI_CONTAINER" >/dev/null 2>&1 || true
+    log "starting floci container ($FLOCI_IMAGE) on :$FLOCI_PORT"
+    docker run -d --name "$FLOCI_CONTAINER" \
+      -p "${FLOCI_PORT}:${FLOCI_PORT}" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -u root \
+      "$FLOCI_IMAGE" >/dev/null
+  fi
+  log "waiting for floci endpoint ${FLOCI_HOST_ENDPOINT} ..."
+  for _ in $(seq 1 40); do
+    curl -sf "${FLOCI_HOST_ENDPOINT}" >/dev/null 2>&1 && { log "floci is up"; return; }
+    sleep 3
+  done
+  warn "floci did not become ready in time; SSM-backed secrets may stay Missing"
 }
 
 # -----------------------------------------------------------------------------
@@ -264,16 +298,24 @@ bootstrap_root() {
 # floci (local AWS) — best-effort seeding of SSM parameters
 # -----------------------------------------------------------------------------
 seed_floci() {
-  step "Seeding floci (AWS SSM parameters) [optional]"
-  if ! require_cmd aws; then warn "aws CLI not found; skipping SSM seeding (floci is optional)"; return; fi
-  local ep="http://localhost:4566"
-  if ! curl -sf "${ep}" >/dev/null 2>&1; then warn "floci not reachable at ${ep}; skipping. Start it from https://github.com/floci-io/floci"; return; fi
+  step "Seeding floci (SSM parameters + ECR registry)"
+  if ! require_cmd aws; then warn "aws CLI not found; skipping floci seeding"; return; fi
+  local ep="$FLOCI_HOST_ENDPOINT"
+  if ! curl -sf "${ep}" >/dev/null 2>&1; then warn "floci not reachable at ${ep}; skipping seeding"; return; fi
   export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION="$AWS_REGION"
+
+  # SSM Parameter Store values consumed by the ExternalSecrets in each env.
   for env in dev prod; do
     aws --endpoint-url "$ep" ssm put-parameter --overwrite \
       --name "/gitops/${env}/app1/greeting" --type String \
       --value "hello from ${env} (via floci SSM)" >/dev/null 2>&1 \
-      && log "put /gitops/${env}/app1/greeting" || warn "failed to put SSM param for ${env}"
+      && log "ssm: /gitops/${env}/app1/greeting" || warn "failed to put SSM param for ${env}"
+  done
+
+  # ECR registry/repos (the lab's "docker images register using AWS ECR").
+  for repo in app1 app2; do
+    aws --endpoint-url "$ep" ecr create-repository --repository-name "gitops/${repo}" \
+      >/dev/null 2>&1 && log "ecr: gitops/${repo}" || true
   done
 }
 
@@ -390,6 +432,8 @@ main() {
   log "Starting GitOps Enterprise Lab install"
   check_deps          # 0
   install_tools       # 1
+  setup_floci         # local AWS (floci) — start before workloads need it
+  seed_floci          # SSM params + ECR repos
   create_clusters     # 2
   install_metallb     # 3
   install_ingress     # 4
@@ -398,7 +442,6 @@ main() {
   register_cluster "$DEV_CLUSTER"   # 7
   register_cluster "$PROD_CLUSTER"  # 8
   bootstrap_root      # 9
-  seed_floci          # optional AWS (floci)
   setup_dns           # 10a
   output              # 10b
 }
