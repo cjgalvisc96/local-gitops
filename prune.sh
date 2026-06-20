@@ -52,14 +52,24 @@ prune_contexts() {
 
 prune_floci() {
   require_cmd docker || return
-  step "Stopping floci (local AWS emulator)"
-  if docker ps -a --format '{{.Names}}' | grep -qx "$FLOCI_CONTAINER"; then
-    docker rm -f "$FLOCI_CONTAINER" >/dev/null 2>&1 && log "removed floci container" || true
+  step "Stopping floci (local AWS emulator) + spawned helpers"
+  # floci and every helper it spawns (ECR registry, RDS postgres, ...) are
+  # name-prefixed 'floci'. Remove them all, with their anonymous volumes.
+  local names
+  names="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^floci' || true)"
+  if [ -n "$names" ]; then
+    echo "$names" | xargs -r docker rm -f -v >/dev/null 2>&1 \
+      && log "removed floci container(s): $(echo "$names" | tr '\n' ' ')" || true
   else
-    log "floci container not present"
+    log "no floci containers present"
   fi
-  docker image inspect "$FLOCI_IMAGE" >/dev/null 2>&1 && docker rmi "$FLOCI_IMAGE" >/dev/null 2>&1 \
-    && log "removed floci image" || true
+  # floci's own image plus the helper images it pulls.
+  for img in "$FLOCI_IMAGE" $FLOCI_HELPER_IMAGES; do
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      docker rmi "$img" >/dev/null 2>&1 && log "removed image $img" \
+        || warn "could not remove image $img (in use elsewhere?)"
+    fi
+  done
 }
 
 # Remove only the Docker artifacts install.sh created: kind node containers and

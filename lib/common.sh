@@ -42,6 +42,9 @@ export GITEA_REPOS=("platform-config" "gitops-apps")
 # floci (local AWS emulator) — https://github.com/floci-io/floci
 export FLOCI_CONTAINER="floci"
 export FLOCI_IMAGE="floci/floci:latest"
+# floci mounts the docker socket and spawns helper containers/images on demand
+# (ECR backing registry, RDS postgres, ...). Cleaned up by prune.sh.
+export FLOCI_HELPER_IMAGES="registry:2 postgres:16-alpine"
 export FLOCI_PORT="4566"
 # Endpoint as seen from the host (install.sh seeding) ...
 export FLOCI_HOST_ENDPOINT="http://localhost:${FLOCI_PORT}"
