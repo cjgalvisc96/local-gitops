@@ -1,12 +1,27 @@
+# Single Argo CD (management cluster) exposed under both env hostnames.
+# Both resolve to the management ingress IP; they are just friendly aliases.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: argocd
   namespace: argocd
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
   rules:
     - host: argo.dev.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80
+    - host: argo.prod.local
       http:
         paths:
           - path: /

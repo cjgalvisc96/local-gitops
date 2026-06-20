@@ -1,0 +1,44 @@
+# One Argo Application per (app x environment). The cluster generator discovers
+# the registered dev/prod clusters by label; the list generator enumerates apps.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: applications
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          - clusters:
+              selector:
+                matchExpressions:
+                  - key: environment
+                    operator: In
+                    values: [dev, prod]
+          - list:
+              elements:
+                - app: app1
+                - app: app2
+  template:
+    metadata:
+      name: "{{.app}}-{{.name}}"
+      labels:
+        gitops.local/env: "{{.name}}"
+        gitops.local/app: "{{.app}}"
+    spec:
+      project: "{{.name}}"
+      source:
+        repoURL: http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops-apps.git
+        targetRevision: HEAD
+        path: "apps/overlays/{{.name}}/{{.app}}"
+      destination:
+        name: "{{.name}}"
+        namespace: "{{.app}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

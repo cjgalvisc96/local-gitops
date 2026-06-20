@@ -1,10 +1,10 @@
-# DEV workload cluster — applications + observability, managed by Argo CD.
+# Management cluster — hosts Gitea + Argo CD (the GitOps control plane).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: dev
+name: management
 nodes:
   - role: control-plane
     labels:
-      gitops.local/role: dev
+      gitops.local/role: management
 networking:
   disableDefaultCNI: false

@@ -1,46 +1,56 @@
 # =========================
-# GITEA HELM CONFIG (LOCAL LAB)
+# GITEA HELM CONFIG (management cluster)
 # =========================
-
 replicaCount: 1
 
+# Internal git protocol over HTTP is enough for a local lab.
 service:
   http:
     type: ClusterIP
     port: 3000
 
 ingress:
-  enabled: false  # IMPORTANT: we manage ingress ourselves via Kustomize
+  enabled: false   # we manage ingress ourselves (bootstrap/gitea/ingress.yaml)
 
 gitea:
   admin:
     username: admin
     password: adminadmin1
-    email: admin@local.dev
-
+    email: admin@gitops.local
   config:
     server:
       DOMAIN: gitea.dev.local
       ROOT_URL: http://gitea.dev.local/
+      # Argo CD clones over the in-cluster service DNS, not the ingress host.
+    service:
+      DISABLE_REGISTRATION: true
+    webhook:
+      ALLOWED_HOST_LIST: "*"   # let Gitea webhooks reach Argo CD if wired later
 
+# Keep the lab disposable: no PVCs, in-memory friendly.
 persistence:
   enabled: false
 
+postgresql-ha:
+  enabled: false
 postgresql:
   enabled: true
+  primary:
+    persistence:
+      enabled: false
   auth:
     postgresPassword: giteaadmin
     username: gitea
     password: giteaadmin
     database: gitea
 
+redis-cluster:
+  enabled: false
+
 resources:
   requests:
     cpu: 100m
     memory: 256Mi
   limits:
-    cpu: 500m
-    memory: 512Mi
-
-# Avoid race conditions in local environments
-waitForDB: true
+    cpu: "1"
+    memory: 1Gi

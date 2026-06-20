@@ -1,175 +1,406 @@
 #!/usr/bin/env bash
+# =============================================================================
+# GitOps Enterprise Lab — one-command installer
+#
+# Builds a 3-cluster local GitOps platform:
+#   management : Gitea + Argo CD (the control plane)
+#   dev / prod : applications + OpenTelemetry + Prometheus + Grafana (GitOps-managed)
+#
+# Follows the steps in NEXT-STEPS.md (0..10). Idempotent: safe to re-run.
+# =============================================================================
 set -euo pipefail
 
-DEV_CLUSTER="local-dev"
-PROD_CLUSTER="local-prod"
+cd "$(dirname "${BASH_SOURCE[0]}")"
+source lib/common.sh
 
-ARGO_VERSION="v2.11.3"
-METALLB_VERSION="v0.14.5"
+# -----------------------------------------------------------------------------
+# 0. Verify dependencies (Docker, Git, Curl)
+# -----------------------------------------------------------------------------
+check_deps() {
+  step "0. Verifying dependencies"
+  local missing=0
+  for d in docker git curl; do
+    if require_cmd "$d"; then log "found: $d"; else err "missing required dependency: $d"; missing=1; fi
+  done
+  [ "$missing" -eq 0 ] || die "Install the missing dependencies and re-run."
+  docker info >/dev/null 2>&1 || die "Docker daemon is not reachable (is it running / are you in the docker group?)."
+}
 
-log() { echo "[INSTALL] $*"; }
-
-########################################
-# TOOLS
-########################################
-
+# -----------------------------------------------------------------------------
+# 1. Install missing tools (kubectl, kind, helm, k9s, argocd)
+# -----------------------------------------------------------------------------
 install_tools() {
-  log "Installing tools..."
+  step "1. Installing missing tools"
+  local arch; arch="$(uname -m)"; [ "$arch" = "x86_64" ] && arch="amd64"; [ "$arch" = "aarch64" ] && arch="arm64"
+  local os; os="$(uname | tr '[:upper:]' '[:lower:]')"
 
-  # kubectl
-  curl -sSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o /tmp/kubectl
-  sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-
-  # kind
-  curl -sSL https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64 -o /tmp/kind
-  sudo install -m 0755 /tmp/kind /usr/local/bin/kind
-
-  # helm
-  if ! command -v helm >/dev/null; then
-    curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  if ! require_cmd kubectl; then
+    log "installing kubectl ${KUBECTL_VERSION}"
+    curl -sSLf "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${os}/${arch}/kubectl" -o /tmp/kubectl
+    sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
   fi
-
-  # k9s
-  K9S_VER=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep tag_name | cut -d '"' -f4)
-  curl -sSL "https://github.com/derailed/k9s/releases/download/${K9S_VER}/k9s_Linux_amd64.tar.gz" -o /tmp/k9s.tgz
-  tar -xzf /tmp/k9s.tgz -C /tmp
-  sudo install -m 0755 /tmp/k9s /usr/local/bin/k9s
-
-  # argocd CLI
-  curl -sSL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /tmp/argocd
-  sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
+  if ! require_cmd kind; then
+    log "installing kind"
+    curl -sSLf "https://kind.sigs.k8s.io/dl/v0.24.0/kind-${os}-${arch}" -o /tmp/kind
+    sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+  fi
+  if ! require_cmd helm; then
+    log "installing helm"
+    curl -sSLf https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  fi
+  if ! require_cmd k9s; then
+    log "installing k9s"
+    curl -sSLf "https://github.com/derailed/k9s/releases/latest/download/k9s_$(uname)_${arch}.tar.gz" -o /tmp/k9s.tgz
+    tar -xzf /tmp/k9s.tgz -C /tmp k9s
+    sudo install -m 0755 /tmp/k9s /usr/local/bin/k9s
+  fi
+  if ! require_cmd argocd; then
+    log "installing argocd CLI"
+    curl -sSLf "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-${os}-${arch}" -o /tmp/argocd
+    sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
+  fi
 }
 
-########################################
-# CLUSTERS (IDEMPOTENT)
-########################################
-
+# -----------------------------------------------------------------------------
+# 2. Create clusters (management, dev, prod)
+# -----------------------------------------------------------------------------
 create_clusters() {
-  log "Creating clusters..."
-
-  kind get clusters | grep -q "$DEV_CLUSTER" || \
-    kind create cluster --name "$DEV_CLUSTER" --config clusters/dev.yaml
-
-  kind get clusters | grep -q "$PROD_CLUSTER" || \
-    kind create cluster --name "$PROD_CLUSTER" --config clusters/prod.yaml
+  step "2. Creating kind clusters"
+  for c in "${CLUSTERS[@]}"; do
+    if kind get clusters 2>/dev/null | grep -qx "$c"; then
+      log "cluster '$c' already exists"
+    else
+      log "creating cluster '$c'"
+      kind create cluster --name "$c" --image "$NODE_IMAGE" --config "clusters/$c.yaml" --wait 120s
+    fi
+  done
 }
 
-########################################
-# SWITCH CONTEXT
-########################################
-
-use_dev() {
-  kubectl config use-context "kind-$DEV_CLUSTER"
-}
-
-########################################
-# INGRES NGINX
-########################################
-
-install_ingress() {
-  log "Installing ingress-nginx..."
-
-  helm upgrade --install ingress-nginx ingress-nginx \
-    --repo https://kubernetes.github.io/ingress-nginx \
-    --namespace ingress-nginx --create-namespace \
-    --set controller.hostPort.enabled=true \
-    --wait
-}
-
-########################################
-# ARGO CD (FIXED ORDER)
-########################################
-
-install_argocd() {
-  log "Creating argocd namespace..."
-  kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-
-  log "Installing Argo CD ${ARGO_VERSION}..."
-  kubectl apply -n argocd \
-    -f https://raw.githubusercontent.com/argoproj/argo-cd/${ARGO_VERSION}/manifests/install.yaml
-
-  log "Waiting for Argo CD CRDs..."
-  kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=180s || true
-  kubectl wait --for=condition=Established crd/applicationsets.argoproj.io --timeout=180s || true
-}
-
-########################################
-# METALLB (CRD FIRST)
-########################################
-
+# -----------------------------------------------------------------------------
+# 3. Install MetalLB (all clusters, non-overlapping pools)
+# -----------------------------------------------------------------------------
 install_metallb() {
-  log "Installing MetalLB..."
-
-  kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml
-
-  log "Waiting for MetalLB CRDs..."
-  kubectl wait --for=condition=Established crd/ipaddresspools.metallb.io --timeout=180s || true
-  kubectl wait --for=condition=Established crd/l2advertisements.metallb.io --timeout=180s || true
-
-  log "Applying MetalLB config..."
-  kubectl apply -f bootstrap/metallb/metallb-pool.yaml
+  step "3. Installing MetalLB on all clusters"
+  local pools=("$MGMT_POOL" "$DEV_POOL" "$PROD_POOL")
+  local i=0
+  for c in "${CLUSTERS[@]}"; do
+    log "[$c] applying MetalLB ${METALLB_VERSION}"
+    kc "$c" apply -f "https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml"
+    kc "$c" wait --for=condition=Available deploy/controller -n metallb-system --timeout=180s
+    kc "$c" wait --for=condition=Established crd/ipaddresspools.metallb.io --timeout=120s
+    log "[$c] configuring address pool ${pools[$i]}"
+    kc "$c" apply -f - <<EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - ${pools[$i]}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - pool
+EOF
+    i=$((i+1))
+  done
 }
 
-########################################
-# HELM APPS
-########################################
-
-install_apps() {
-  log "Installing Gitea..."
-
-  helm repo add gitea https://dl.gitea.com/charts || true
-  helm repo update
-
-  helm upgrade --install gitea gitea/gitea \
-    -n gitea --create-namespace \
-    -f bootstrap/gitea/values.yaml
+# -----------------------------------------------------------------------------
+# 4. Install ingress-nginx (all clusters)
+# -----------------------------------------------------------------------------
+install_ingress() {
+  step "4. Installing ingress-nginx on all clusters"
+  for c in "${CLUSTERS[@]}"; do
+    log "[$c] installing ingress-nginx ${INGRESS_NGINX_VERSION}"
+    helm --kube-context "$(ctx "$c")" upgrade --install ingress-nginx ingress-nginx \
+      --repo https://kubernetes.github.io/ingress-nginx \
+      --version "$INGRESS_NGINX_VERSION" \
+      --namespace ingress-nginx --create-namespace \
+      -f bootstrap/ingress-nginx/values.yaml \
+      --wait --timeout 300s
+  done
 }
 
-########################################
-# BOOTSTRAP KUSTOMIZE
-########################################
-
-apply_bootstrap() {
-  log "Applying bootstrap manifests..."
-
-  kubectl apply -k bootstrap/
+# -----------------------------------------------------------------------------
+# 5. Install Gitea (management) + seed GitOps repos
+# -----------------------------------------------------------------------------
+install_gitea() {
+  step "5. Installing Gitea on the management cluster"
+  helm repo add gitea https://dl.gitea.com/charts >/dev/null 2>&1 || true
+  helm repo update gitea >/dev/null
+  helm --kube-context "$(ctx "$MGMT_CLUSTER")" upgrade --install gitea gitea/gitea \
+    --version "$GITEA_CHART_VERSION" \
+    --namespace gitea --create-namespace \
+    -f bootstrap/gitea/values.yaml \
+    --wait --timeout 600s
+  kc "$MGMT_CLUSTER" apply -f bootstrap/gitea/ingress.yaml
+  seed_gitea
 }
 
-########################################
-# OUTPUT
-########################################
+seed_gitea() {
+  log "seeding Gitea org '${GITEA_ORG}' and GitOps repos"
+  # Port-forward the Gitea API/HTTP to localhost for setup.
+  kc "$MGMT_CLUSTER" -n gitea port-forward svc/gitea-http 3000:3000 >/tmp/gitea-pf.log 2>&1 &
+  local pf=$!
+  trap 'kill '"$pf"' >/dev/null 2>&1 || true' RETURN
+  local base="http://localhost:3000"
+  local auth="${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}"
 
+  log "waiting for Gitea API..."
+  for _ in $(seq 1 60); do
+    curl -sf "${base}/api/v1/version" >/dev/null 2>&1 && break
+    sleep 3
+  done
+
+  # Org (ignore 'already exists').
+  curl -sf -u "$auth" -X POST "${base}/api/v1/orgs" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"${GITEA_ORG}\"}" >/dev/null 2>&1 || true
+
+  for repo in "${GITEA_REPOS[@]}"; do
+    curl -sf -u "$auth" -X POST "${base}/api/v1/orgs/${GITEA_ORG}/repos" \
+      -H 'Content-Type: application/json' \
+      -d "{\"name\":\"${repo}\",\"private\":false,\"auto_init\":false}" >/dev/null 2>&1 || true
+    push_repo "$repo" "${base}"
+  done
+  kill "$pf" >/dev/null 2>&1 || true
+  trap - RETURN
+}
+
+# push_repo <local-dir-name> <gitea-base-url>
+push_repo() {
+  local repo="$1" base="$2"
+  local src="${REPO_ROOT}/${repo}"
+  [ -d "$src" ] || { warn "missing source dir for repo '$repo'"; return; }
+  log "pushing '$repo' to Gitea"
+  local tmp; tmp="$(mktemp -d)"
+  cp -r "$src/." "$tmp/"
+  (
+    cd "$tmp"
+    git init -q -b main
+    git config user.email "installer@gitops.local"
+    git config user.name "installer"
+    git add -A
+    git commit -q -m "chore: seed ${repo} from install.sh"
+    git push -qf "http://${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}@localhost:3000/${GITEA_ORG}/${repo}.git" main
+  )
+  rm -rf "$tmp"
+}
+
+# -----------------------------------------------------------------------------
+# 6. Install Argo CD (management)
+# -----------------------------------------------------------------------------
+install_argocd() {
+  step "6. Installing Argo CD on the management cluster"
+  kc "$MGMT_CLUSTER" create namespace argocd --dry-run=client -o yaml | kc "$MGMT_CLUSTER" apply -f -
+  kc "$MGMT_CLUSTER" apply -n argocd \
+    -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+  log "applying Argo CD config (insecure server, RBAC, ingress)"
+  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/argocd-cmd-params.yaml
+  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/argocd-rbac.yaml
+  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/ingress.yaml
+  log "waiting for Argo CD to become ready"
+  kc "$MGMT_CLUSTER" wait --for=condition=Established crd/applications.argoproj.io --timeout=180s
+  kc "$MGMT_CLUSTER" wait --for=condition=Established crd/applicationsets.argoproj.io --timeout=180s
+  kc "$MGMT_CLUSTER" -n argocd rollout restart deploy/argocd-server
+  kc "$MGMT_CLUSTER" -n argocd rollout status deploy/argocd-server --timeout=300s
+}
+
+# -----------------------------------------------------------------------------
+# 7 & 8. Register dev / prod clusters with Argo CD
+# -----------------------------------------------------------------------------
+# register_cluster <cluster-name>
+register_cluster() {
+  local c="$1"
+  step "Registering '$c' cluster with Argo CD"
+  local ip; ip="$(cluster_internal_ip "$c")"
+  [ -n "$ip" ] || die "could not determine internal IP of $c-control-plane"
+  local server="https://${ip}:6443"
+
+  local kcfg; kcfg="$(mktemp)"
+  kind get kubeconfig --name "$c" >"$kcfg"
+  local ca cert key
+  ca="$(kubectl --kubeconfig="$kcfg" config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
+  cert="$(kubectl --kubeconfig="$kcfg" config view --raw -o jsonpath='{.users[0].user.client-certificate-data}')"
+  key="$(kubectl --kubeconfig="$kcfg" config view --raw -o jsonpath='{.users[0].user.client-key-data}')"
+  rm -f "$kcfg"
+
+  log "[$c] internal API endpoint: $server"
+  kc "$MGMT_CLUSTER" apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${c}
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+    environment: ${c}
+type: Opaque
+stringData:
+  name: ${c}
+  server: ${server}
+  config: |
+    {"tlsClientConfig":{"caData":"${ca}","certData":"${cert}","keyData":"${key}"}}
+EOF
+}
+
+# -----------------------------------------------------------------------------
+# 9. Bootstrap the root Application (app-of-apps)
+# -----------------------------------------------------------------------------
+bootstrap_root() {
+  step "9. Bootstrapping the root Application"
+  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/root-app.yaml
+  log "Argo CD will now reconcile platform-config -> projects, applicationsets, apps."
+}
+
+# -----------------------------------------------------------------------------
+# floci (local AWS) — best-effort seeding of SSM parameters
+# -----------------------------------------------------------------------------
+seed_floci() {
+  step "Seeding floci (AWS SSM parameters) [optional]"
+  if ! require_cmd aws; then warn "aws CLI not found; skipping SSM seeding (floci is optional)"; return; fi
+  local ep="http://localhost:4566"
+  if ! curl -sf "${ep}" >/dev/null 2>&1; then warn "floci not reachable at ${ep}; skipping. Start it from https://github.com/floci-io/floci"; return; fi
+  export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION="$AWS_REGION"
+  for env in dev prod; do
+    aws --endpoint-url "$ep" ssm put-parameter --overwrite \
+      --name "/gitops/${env}/app1/greeting" --type String \
+      --value "hello from ${env} (via floci SSM)" >/dev/null 2>&1 \
+      && log "put /gitops/${env}/app1/greeting" || warn "failed to put SSM param for ${env}"
+  done
+}
+
+# -----------------------------------------------------------------------------
+# DNS — dnsmasq + systemd-resolved (fallback: /etc/hosts), no manual edits
+# -----------------------------------------------------------------------------
+lb_ip() { kc "$1" -n ingress-nginx get svc ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null; }
+
+wait_lb_ip() {
+  local c="$1" ip=""
+  for _ in $(seq 1 60); do ip="$(lb_ip "$c")"; [ -n "$ip" ] && { echo "$ip"; return; }; sleep 3; done
+  return 1
+}
+
+setup_dns() {
+  step "10a. Configuring local DNS"
+  MGMT_IP="$(wait_lb_ip "$MGMT_CLUSTER")" || die "management ingress never got a LoadBalancer IP"
+  DEV_IP="$(wait_lb_ip "$DEV_CLUSTER")"   || die "dev ingress never got a LoadBalancer IP"
+  PROD_IP="$(wait_lb_ip "$PROD_CLUSTER")" || die "prod ingress never got a LoadBalancer IP"
+  log "ingress IPs  mgmt=$MGMT_IP  dev=$DEV_IP  prod=$PROD_IP"
+
+  # Host -> IP map. Management UIs are aliased under the *.dev/*.prod names.
+  declare -A HOSTS=(
+    [gitea.dev.local]="$MGMT_IP"
+    [argo.dev.local]="$MGMT_IP"
+    [argo.prod.local]="$MGMT_IP"
+    [grafana.dev.local]="$DEV_IP"
+    [app1.dev.local]="$DEV_IP"
+    [app2.dev.local]="$DEV_IP"
+    [grafana.prod.local]="$PROD_IP"
+    [app1.prod.local]="$PROD_IP"
+    [app2.prod.local]="$PROD_IP"
+  )
+
+  if require_cmd dnsmasq && systemctl is-active --quiet systemd-resolved; then
+    setup_dns_dnsmasq
+  else
+    warn "dnsmasq or systemd-resolved unavailable; falling back to /etc/hosts"
+    setup_dns_hosts
+  fi
+}
+
+setup_dns_dnsmasq() {
+  log "writing dnsmasq config ${DNS_CONFFILE}"
+  {
+    echo "port=${DNS_PORT}"
+    echo "listen-address=127.0.0.1"
+    echo "bind-interfaces"
+    echo "no-resolv"
+    for h in "${!HOSTS[@]}"; do echo "address=/${h}/${HOSTS[$h]}"; done
+  } >"$DNS_CONFFILE"
+
+  # (re)start a dedicated dnsmasq instance.
+  [ -f "$DNS_PIDFILE" ] && sudo kill "$(cat "$DNS_PIDFILE")" >/dev/null 2>&1 || true
+  sudo dnsmasq --conf-file="$DNS_CONFFILE" --pid-file="$DNS_PIDFILE"
+  log "dnsmasq listening on 127.0.0.1:${DNS_PORT}"
+
+  log "routing *.dev.local / *.prod.local to dnsmasq via systemd-resolved"
+  sudo mkdir -p "$(dirname "$RESOLVED_DROPIN")"
+  sudo tee "$RESOLVED_DROPIN" >/dev/null <<EOF
+# Managed by gitops-lab install.sh
+[Resolve]
+DNS=127.0.0.1:${DNS_PORT}
+Domains=~dev.local ~prod.local
+EOF
+  sudo systemctl restart systemd-resolved
+}
+
+setup_dns_hosts() {
+  log "updating /etc/hosts (gitops-lab block)"
+  sudo sed -i '/# gitops-lab/d' /etc/hosts
+  for h in "${!HOSTS[@]}"; do
+    echo "${HOSTS[$h]} ${h} # gitops-lab" | sudo tee -a /etc/hosts >/dev/null
+  done
+}
+
+# -----------------------------------------------------------------------------
+# 10b. Print URLs / credentials
+# -----------------------------------------------------------------------------
 output() {
-  echo ""
-  echo "=================================="
-  echo "🚀 PLATFORM READY"
-  echo "=================================="
-  echo "Argo CD : http://argo.dev.local"
-  echo "Gitea   : http://gitea.dev.local"
-  echo "Dev App : http://app.dev.local"
-  echo "Prod App: http://app.prod.local"
-  echo "=================================="
+  step "10. Platform ready"
+  local argo_pw; argo_pw="$(kc "$MGMT_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
+    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  cat <<EOF
+
+==================================================================
+  🚀  GitOps Enterprise Lab is UP
+==================================================================
+  Control plane (management cluster)
+    Gitea        http://gitea.dev.local        ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
+    Argo CD      http://argo.dev.local          (admin / ${argo_pw:-<see below>})
+                 http://argo.prod.local
+  DEV cluster
+    Grafana      http://grafana.dev.local       (anonymous viewer / admin:admin)
+    app1         http://app1.dev.local
+    app2         http://app2.dev.local
+  PROD cluster
+    Grafana      http://grafana.prod.local
+    app1         http://app1.prod.local
+    app2         http://app2.prod.local
+------------------------------------------------------------------
+  Argo CD admin password:
+    kubectl --context kind-management -n argocd get secret \\
+      argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+  Watch sync:  argocd app list   (after: argocd login argo.dev.local)
+  Tip:         k9s --context kind-management
+==================================================================
+EOF
 }
 
-########################################
-# MAIN
-########################################
-
+# -----------------------------------------------------------------------------
 main() {
-  log "🚀 STARTING FULL BOOTSTRAP (FIXED ORDER)"
-
-  install_tools
-  create_clusters
-  use_dev
-
-  install_ingress
-  install_argocd
-  install_metallb
-  install_apps
-
-  apply_bootstrap
-
-  output
+  log "Starting GitOps Enterprise Lab install"
+  check_deps          # 0
+  install_tools       # 1
+  create_clusters     # 2
+  install_metallb     # 3
+  install_ingress     # 4
+  install_gitea       # 5 (+ seed repos)
+  install_argocd      # 6
+  register_cluster "$DEV_CLUSTER"   # 7
+  register_cluster "$PROD_CLUSTER"  # 8
+  bootstrap_root      # 9
+  seed_floci          # optional AWS (floci)
+  setup_dns           # 10a
+  output              # 10b
 }
 
-main
+main "$@"

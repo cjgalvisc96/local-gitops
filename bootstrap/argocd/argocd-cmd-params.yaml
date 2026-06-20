@@ -1,0 +1,13 @@
+# Run argocd-server in insecure mode so ingress-nginx can terminate plain HTTP.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cmd-params-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  server.insecure: "true"
+  # Allow the ApplicationSet controller to template from the cluster generator.
+  applicationsetcontroller.enable.progressive.syncs: "true"

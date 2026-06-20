@@ -1,0 +1,19 @@
+# Helm values for ingress-nginx on every cluster.
+# Service is LoadBalancer so MetalLB hands it a routable IP on the kind network.
+controller:
+  service:
+    type: LoadBalancer
+  # kind single-node: allow the controller onto the control-plane node.
+  watchIngressWithoutClass: true
+  ingressClassResource:
+    default: true
+  admissionWebhooks:
+    enabled: false        # avoids flaky webhook timeouts on fresh local clusters
+  config:
+    # Argo CD server speaks gRPC + HTTP on the same port; keep large bodies for git push.
+    proxy-body-size: "1024m"
+    allow-snippet-annotations: "true"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi

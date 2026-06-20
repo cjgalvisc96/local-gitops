@@ -1,0 +1,28 @@
+# Isolated, clearly-labeled namespaces per the "isolate and clean namespaces" goal.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app1
+  labels:
+    gitops.local/tier: application
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app2
+  labels:
+    gitops.local/tier: application
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    gitops.local/tier: observability
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-system
+  labels:
+    gitops.local/tier: platform

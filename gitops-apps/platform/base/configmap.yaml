@@ -1,0 +1,12 @@
+# Shared platform configuration consumed by workloads / tooling in the cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+  namespace: platform-system
+data:
+  ENVIRONMENT: "unset"          # overridden per environment overlay
+  AWS_REGION: "us-east-1"
+  # floci emulates AWS locally; in-cluster workloads reach it via the host gateway.
+  AWS_ENDPOINT_URL: "http://host.docker.internal:4566"
+  ECR_REGISTRY: "000000000000.dkr.ecr.us-east-1.amazonaws.com"

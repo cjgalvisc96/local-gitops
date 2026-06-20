@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: prod
+  namespace: argocd
+spec:
+  description: Workloads and observability for the PROD cluster.
+  sourceRepos:
+    - http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops-apps.git
+    - https://charts.external-secrets.io
+  destinations:
+    - name: prod
+      namespace: "*"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
