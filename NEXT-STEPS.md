@@ -189,6 +189,11 @@ These should be automatically configured during installation through a local DNS
 # prune.sh
 also create and prune.sh to remove totally all the tools and things installed in install.sh
 
+# others
+Don't forget: ConfigMap, SecretStore(using aws ssm) and rbac, docker images register using AWS ECR.
+Isolate and clean namespaces.
+I'm using floci(https://github.com/floci-io/floci) to simulate full AWS locally
+
 # What the Lab Demonstrates
 
 ✅ Multi-cluster Kubernetes
