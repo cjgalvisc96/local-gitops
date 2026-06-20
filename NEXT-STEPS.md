@@ -186,6 +186,9 @@ These should be automatically configured during installation through a local DNS
 9. Bootstrap root Application
 10. Print URLs
 
+# prune.sh
+also create and prune.sh to remove totally all the tools and things installed in install.sh
+
 # What the Lab Demonstrates
 
 ✅ Multi-cluster Kubernetes
