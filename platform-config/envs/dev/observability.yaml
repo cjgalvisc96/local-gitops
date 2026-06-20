@@ -1,0 +1,20 @@
+# OpenTelemetry Collector + Prometheus + Grafana.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-dev
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: dev
+  source:
+    repoURL: http://172.18.255.209:3000/gitops/gitops-apps.git
+    targetRevision: HEAD
+    path: observability/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]

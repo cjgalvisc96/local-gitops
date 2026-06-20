@@ -1,0 +1,20 @@
+# Namespaces, ConfigMap, RBAC, and the floci-backed ClusterSecretStore.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-prod
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: prod
+  source:
+    repoURL: http://172.18.255.209:3000/gitops/gitops-apps.git
+    targetRevision: HEAD
+    path: platform/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform-system
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]

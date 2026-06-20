@@ -1,0 +1,23 @@
+# AppProject for the dev environment's Argo CD (runs in the dev cluster and
+# manages only that cluster, in-cluster).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: dev
+  namespace: argocd
+spec:
+  description: dev environment workloads (managed by the dev cluster's own Argo CD).
+  sourceRepos:
+    - http://172.18.255.209:3000/gitops/platform-config.git
+    - http://172.18.255.209:3000/gitops/gitops-apps.git
+    - http://172.18.255.209:3000/gitops/modular-monolithic-app.git
+    - https://charts.external-secrets.io
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "*"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

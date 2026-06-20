@@ -113,6 +113,13 @@ prune_docker() {
     log "removing node image $NODE_IMAGE"
     docker rmi "$NODE_IMAGE" 2>/dev/null || true
   fi
+
+  # The app images install.sh built and kind-loaded.
+  for tag in dev prod; do
+    if docker image inspect "${APP_IMAGE}:${tag}" >/dev/null 2>&1; then
+      docker rmi "${APP_IMAGE}:${tag}" 2>/dev/null && log "removed image ${APP_IMAGE}:${tag}" || true
+    fi
+  done
 }
 
 prune_tools() {

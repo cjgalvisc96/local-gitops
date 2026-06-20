@@ -1,0 +1,33 @@
+# The modular-monolith todo-app, from its own Helm chart (Gitea-mirrored).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: todo-app-dev
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dev
+  source:
+    repoURL: http://172.18.255.209:3000/gitops/modular-monolithic-app.git
+    targetRevision: HEAD
+    path: infra/k8s/helm
+    helm:
+      releaseName: todo-app
+      valueFiles:
+        - values.yaml
+        - values-dev.yaml
+      parameters:
+        - name: namespaceConfig.create
+          value: "false"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: todo-app
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ApplyOutOfSyncOnly=true]
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 3m }

@@ -1,5 +1,5 @@
 # Namespace-scoped RBAC demonstrating least-privilege per tier.
-# A "deployer" ServiceAccount with full rights inside application namespaces,
+# A "deployer" ServiceAccount with full rights inside the application namespace,
 # and a read-only role for the observability namespace.
 apiVersion: v1
 kind: ServiceAccount
@@ -11,7 +11,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: app-admin
-  namespace: app1
+  namespace: todo-app
 rules:
   - apiGroups: ["", "apps", "networking.k8s.io"]
     resources: ["*"]
@@ -20,8 +20,8 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: deployer-app1
-  namespace: app1
+  name: deployer-todo-app
+  namespace: todo-app
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

@@ -1,19 +1,22 @@
+# Argo CD UI for the prod cluster, exposed at argo.prod.local.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: app
+  name: argocd
+  namespace: argocd
   annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
   rules:
-    - host: app2.prod.local
+    - host: argo.prod.local
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: app
+                name: argocd-server
                 port:
-                  number: 9898
+                  number: 80

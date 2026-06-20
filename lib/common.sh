@@ -33,11 +33,29 @@ export DNS_CONFFILE="/tmp/gitops-dnsmasq.conf"
 export RESOLVED_DROPIN="/etc/systemd/resolved.conf.d/gitops-lab.conf"
 export LAB_DOMAINS=("dev.local" "prod.local")
 
-# Gitea
+# Argo CD runs in EACH workload cluster (one Argo per env), not on management.
+export ARGO_CLUSTERS=("$DEV_CLUSTER" "$PROD_CLUSTER")
+
+# Gitea lives on the management cluster but must be cloneable from the dev/prod
+# Argo instances. We give it a pinned MetalLB LoadBalancer IP (in the management
+# pool) so its git URL is stable and reachable across clusters on the kind bridge.
 export GITEA_ADMIN_USER="gitea_admin"   # 'admin' is reserved in Gitea
 export GITEA_ADMIN_PASSWORD="adminadmin1"
 export GITEA_ORG="gitops"
+export GITEA_GIT_IP="172.18.255.209"    # pinned LB IP for cross-cluster git
+export GITEA_GIT_URL="http://${GITEA_GIT_IP}:3000/${GITEA_ORG}"
+
+# Git repositories pushed into Gitea by install.sh.
 export GITEA_REPOS=("platform-config" "gitops-apps")
+
+# The application to deploy (its own repo + Helm chart). Pushed to Gitea too.
+# DEPLOY_APP gates the whole todo-app path (image build, repo mirror, and the
+# todo-app + postgres/redis Argo Applications). Off by default for now:
+#   DEPLOY_APP=true ./install.sh   # to deploy the app
+export DEPLOY_APP="${DEPLOY_APP:-false}"
+export APP_REPO_NAME="modular-monolithic-app"
+export APP_REPO_PATH="${APP_REPO_PATH:-$HOME/Documents/Personal/modular-monolithic-app}"
+export APP_IMAGE="local/todo-app"       # built from the app's Dockerfile
 
 # floci (local AWS emulator) — https://github.com/floci-io/floci
 export FLOCI_CONTAINER="floci"

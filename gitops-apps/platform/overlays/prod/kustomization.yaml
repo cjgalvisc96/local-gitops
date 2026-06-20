@@ -15,10 +15,3 @@ patches:
       - op: replace
         path: /data/ENVIRONMENT
         value: prod
-  - target:
-      kind: ExternalSecret
-      name: app1-secrets
-    patch: |
-      - op: replace
-        path: /spec/data/0/remoteRef/key
-        value: /gitops/prod/app1/greeting

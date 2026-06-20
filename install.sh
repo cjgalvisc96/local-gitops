@@ -208,6 +208,8 @@ install_gitea() {
     -f bootstrap/gitea/values.yaml \
     --wait --timeout 600s
   kc "$MGMT_CLUSTER" apply -f bootstrap/gitea/ingress.yaml
+  # Pinned LB so the dev/prod Argo instances can clone Gitea cross-cluster.
+  kc "$MGMT_CLUSTER" apply -f bootstrap/gitea/git-lb.yaml
   seed_gitea
 }
 
@@ -231,20 +233,32 @@ seed_gitea() {
     -H 'Content-Type: application/json' \
     -d "{\"username\":\"${GITEA_ORG}\"}" >/dev/null 2>&1 || true
 
+  # Lab repos that live inside this repo (platform-config, gitops-apps).
   for repo in "${GITEA_REPOS[@]}"; do
-    curl -sf -u "$auth" -X POST "${base}/api/v1/orgs/${GITEA_ORG}/repos" \
-      -H 'Content-Type: application/json' \
-      -d "{\"name\":\"${repo}\",\"private\":false,\"auto_init\":false}" >/dev/null 2>&1 || true
-    push_repo "$repo" "${base}"
+    create_gitea_repo "$repo" "$auth" "$base"
+    push_repo "$repo" "${REPO_ROOT}/${repo}"
   done
+  # The application repo (external git repo with its own Helm chart).
+  if [ -d "$APP_REPO_PATH" ]; then
+    create_gitea_repo "$APP_REPO_NAME" "$auth" "$base"
+    push_app_repo
+  else
+    warn "app repo not found at $APP_REPO_PATH; skipping (set APP_REPO_PATH to deploy it)"
+  fi
   kill "$pf" >/dev/null 2>&1 || true
   trap - RETURN
 }
 
-# push_repo <local-dir-name> <gitea-base-url>
+create_gitea_repo() {
+  local repo="$1" auth="$2" base="$3"
+  curl -sf -u "$auth" -X POST "${base}/api/v1/orgs/${GITEA_ORG}/repos" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"${repo}\",\"private\":false,\"auto_init\":false}" >/dev/null 2>&1 || true
+}
+
+# push_repo <repo-name> <local-src-dir>  — snapshot a directory as a fresh repo.
 push_repo() {
-  local repo="$1" base="$2"
-  local src="${REPO_ROOT}/${repo}"
+  local repo="$1" src="$2"
   [ -d "$src" ] || { warn "missing source dir for repo '$repo'"; return; }
   log "pushing '$repo' to Gitea"
   local tmp; tmp="$(mktemp -d)"
@@ -261,70 +275,76 @@ push_repo() {
   rm -rf "$tmp"
 }
 
+# Mirror the application repo's tracked files (respecting its .gitignore) to Gitea.
+push_app_repo() {
+  log "mirroring app repo '${APP_REPO_NAME}' (tracked files) to Gitea"
+  local tmp; tmp="$(mktemp -d)"
+  git -C "$APP_REPO_PATH" archive --format=tar HEAD | tar -x -C "$tmp" 2>/dev/null \
+    || { warn "could not archive $APP_REPO_PATH (is it a git repo with commits?)"; rm -rf "$tmp"; return; }
+  (
+    cd "$tmp"
+    git init -q -b main
+    git config user.email "installer@gitops.local"
+    git config user.name "installer"
+    git add -A
+    git commit -q -m "chore: mirror ${APP_REPO_NAME} from install.sh"
+    git push -qf "http://${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}@localhost:3000/${GITEA_ORG}/${APP_REPO_NAME}.git" main
+  )
+  rm -rf "$tmp"
+}
+
 # -----------------------------------------------------------------------------
-# 6. Install Argo CD (management)
+# 6. Install Argo CD in EACH workload cluster (one Argo per env)
 # -----------------------------------------------------------------------------
 install_argocd() {
-  step "6. Installing Argo CD on the management cluster"
-  kc "$MGMT_CLUSTER" create namespace argocd --dry-run=client -o yaml | kc "$MGMT_CLUSTER" apply -f -
-  kc "$MGMT_CLUSTER" apply -n argocd \
-    -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
-  log "applying Argo CD config (insecure server, RBAC, ingress)"
-  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/argocd-cmd-params.yaml
-  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/argocd-rbac.yaml
-  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/ingress.yaml
-  log "waiting for Argo CD to become ready"
-  kc "$MGMT_CLUSTER" wait --for=condition=Established crd/applications.argoproj.io --timeout=180s
-  kc "$MGMT_CLUSTER" wait --for=condition=Established crd/applicationsets.argoproj.io --timeout=180s
-  kc "$MGMT_CLUSTER" -n argocd rollout restart deploy/argocd-server
-  kc "$MGMT_CLUSTER" -n argocd rollout status deploy/argocd-server --timeout=300s
+  step "6. Installing Argo CD in the dev & prod clusters"
+  for c in "${ARGO_CLUSTERS[@]}"; do
+    log "[$c] installing Argo CD ${ARGOCD_VERSION}"
+    kc "$c" create namespace argocd --dry-run=client -o yaml | kc "$c" apply -f -
+    kc "$c" apply -n argocd \
+      -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+    kc "$c" apply -f bootstrap/argocd/argocd-cmd-params.yaml
+    kc "$c" apply -f bootstrap/argocd/argocd-rbac.yaml
+    kc "$c" apply -f "bootstrap/argocd/ingress-${c}.yaml"
+    kc "$c" wait --for=condition=Established crd/applications.argoproj.io --timeout=180s
+    kc "$c" -n argocd rollout restart deploy/argocd-server
+    kc "$c" -n argocd rollout status deploy/argocd-server --timeout=300s
+  done
 }
 
 # -----------------------------------------------------------------------------
-# 7 & 8. Register dev / prod clusters with Argo CD
+# 7. Build the app image and load it into the dev & prod clusters
 # -----------------------------------------------------------------------------
-# register_cluster <cluster-name>
-register_cluster() {
-  local c="$1"
-  step "Registering '$c' cluster with Argo CD"
-  local ip; ip="$(cluster_internal_ip "$c")"
-  [ -n "$ip" ] || die "could not determine internal IP of $c-control-plane"
-  local server="https://${ip}:6443"
-
-  local kcfg; kcfg="$(mktemp)"
-  kind get kubeconfig --name "$c" >"$kcfg"
-  local ca cert key
-  ca="$(kubectl --kubeconfig="$kcfg" config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
-  cert="$(kubectl --kubeconfig="$kcfg" config view --raw -o jsonpath='{.users[0].user.client-certificate-data}')"
-  key="$(kubectl --kubeconfig="$kcfg" config view --raw -o jsonpath='{.users[0].user.client-key-data}')"
-  rm -f "$kcfg"
-
-  log "[$c] internal API endpoint: $server"
-  kc "$MGMT_CLUSTER" apply -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${c}
-  namespace: argocd
-  labels:
-    argocd.argoproj.io/secret-type: cluster
-    environment: ${c}
-type: Opaque
-stringData:
-  name: ${c}
-  server: ${server}
-  config: |
-    {"tlsClientConfig":{"caData":"${ca}","certData":"${cert}","keyData":"${key}"}}
-EOF
+build_and_load_image() {
+  step "7. Building & loading the todo-app image"
+  if [ ! -d "$APP_REPO_PATH" ]; then
+    warn "app repo not found at $APP_REPO_PATH; skipping image build"
+    return
+  fi
+  for tag in dev prod; do
+    log "building ${APP_IMAGE}:${tag}"
+    docker build -t "${APP_IMAGE}:${tag}" "$APP_REPO_PATH" >/dev/null \
+      || { warn "image build failed for ${APP_IMAGE}:${tag}"; return; }
+  done
+  # dev cluster runs :dev, prod cluster runs :prod (both loaded so either works).
+  for c in "${ARGO_CLUSTERS[@]}"; do
+    for tag in dev prod; do
+      log "[$c] loading ${APP_IMAGE}:${tag}"
+      kind load docker-image "${APP_IMAGE}:${tag}" --name "$c" >/dev/null 2>&1 || true
+    done
+  done
 }
 
 # -----------------------------------------------------------------------------
-# 9. Bootstrap the root Application (app-of-apps)
+# 8. Bootstrap each cluster's root Application (app-of-apps)
 # -----------------------------------------------------------------------------
 bootstrap_root() {
-  step "9. Bootstrapping the root Application"
-  kc "$MGMT_CLUSTER" apply -f bootstrap/argocd/root-app.yaml
-  log "Argo CD will now reconcile platform-config -> projects, applicationsets, apps."
+  step "8. Bootstrapping per-cluster root Applications"
+  for c in "${ARGO_CLUSTERS[@]}"; do
+    log "[$c] applying root app (envs/$c)"
+    kc "$c" apply -f "bootstrap/argocd/root-${c}.yaml"
+  done
+  log "Each Argo CD now reconciles its env from platform-config/envs/<env>."
 }
 
 # -----------------------------------------------------------------------------
@@ -338,19 +358,22 @@ seed_floci() {
   # Use the local 'floci' profile created by setup_aws_profile.
   export AWS_PROFILE="$AWS_PROFILE_NAME"
 
-  # SSM Parameter Store values consumed by the ExternalSecrets in each env.
+  # SSM params consumed by the todo-app's ExternalSecret (/gitops/<env>/todo-app/*).
+  # Values match the postgres/redis dependencies the platform deploys.
   for env in dev prod; do
-    aws --endpoint-url "$ep" ssm put-parameter --overwrite \
-      --name "/gitops/${env}/app1/greeting" --type String \
-      --value "hello from ${env} (via floci SSM)" >/dev/null 2>&1 \
-      && log "ssm: /gitops/${env}/app1/greeting" || warn "failed to put SSM param for ${env}"
+    local pfx="/gitops/${env}/todo-app"
+    aws --endpoint-url "$ep" ssm put-parameter --overwrite --type String \
+      --name "${pfx}/DB_USER" --value "todo" >/dev/null 2>&1 || true
+    aws --endpoint-url "$ep" ssm put-parameter --overwrite --type SecureString \
+      --name "${pfx}/DB_PASSWORD" --value "todo" >/dev/null 2>&1 || true
+    aws --endpoint-url "$ep" ssm put-parameter --overwrite --type SecureString \
+      --name "${pfx}/REDIS_PASSWORD" --value "redispass" >/dev/null 2>&1 || true
+    log "ssm: ${pfx}/{DB_USER,DB_PASSWORD,REDIS_PASSWORD}"
   done
 
-  # ECR registry/repos (the lab's "docker images register using AWS ECR").
-  for repo in app1 app2; do
-    aws --endpoint-url "$ep" ecr create-repository --repository-name "gitops/${repo}" \
-      >/dev/null 2>&1 && log "ecr: gitops/${repo}" || true
-  done
+  # ECR repo (the lab's "docker images register using AWS ECR").
+  aws --endpoint-url "$ep" ecr create-repository --repository-name "gitops/todo-app" \
+    >/dev/null 2>&1 && log "ecr: gitops/todo-app" || true
 }
 
 # -----------------------------------------------------------------------------
@@ -372,17 +395,16 @@ setup_dns() {
   PROD_IP="$(wait_lb_ip "$PROD_CLUSTER")" || die "prod ingress never got a LoadBalancer IP"
   log "ingress IPs  mgmt=$MGMT_IP  dev=$DEV_IP  prod=$PROD_IP"
 
-  # Host -> IP map. Management UIs are aliased under the *.dev/*.prod names.
+  # Host -> IP map. Gitea is on management; each env's Argo + apps live in that
+  # env's own cluster, so argo/grafana/todo-app.<env>.local point at <env>'s ingress.
   declare -A HOSTS=(
     [gitea.dev.local]="$MGMT_IP"
-    [argo.dev.local]="$MGMT_IP"
-    [argo.prod.local]="$MGMT_IP"
+    [argo.dev.local]="$DEV_IP"
     [grafana.dev.local]="$DEV_IP"
-    [app1.dev.local]="$DEV_IP"
-    [app2.dev.local]="$DEV_IP"
+    [todo-app.dev.local]="$DEV_IP"
+    [argo.prod.local]="$PROD_IP"
     [grafana.prod.local]="$PROD_IP"
-    [app1.prod.local]="$PROD_IP"
-    [app2.prod.local]="$PROD_IP"
+    [todo-app.prod.local]="$PROD_IP"
   )
 
   # System-level split DNS via dnsmasq + systemd-resolved (so the whole host,
@@ -436,32 +458,34 @@ setup_dns_hosts() {
 # 10b. Print URLs / credentials
 # -----------------------------------------------------------------------------
 output() {
-  step "10. Platform ready"
-  local argo_pw; argo_pw="$(kc "$MGMT_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
+  step "Platform ready"
+  local dev_pw prod_pw
+  dev_pw="$(kc "$DEV_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
+    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  prod_pw="$(kc "$PROD_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
     -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
   cat <<EOF
 
 ==================================================================
   🚀  GitOps Enterprise Lab is UP
 ==================================================================
-  Control plane (management cluster)
-    Gitea        http://gitea.dev.local        ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
-    Argo CD      http://argo.dev.local          (admin / ${argo_pw:-<see below>})
-                 http://argo.prod.local
-  DEV cluster
-    Grafana      http://grafana.dev.local       (anonymous viewer / admin:admin)
-    app1         http://app1.dev.local
-    app2         http://app2.dev.local
-  PROD cluster
-    Grafana      http://grafana.prod.local
-    app1         http://app1.prod.local
-    app2         http://app2.prod.local
+  management cluster
+    Gitea        http://gitea.dev.local         ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
+  DEV cluster (its own Argo CD)
+    Argo CD      http://argo.dev.local          (admin / ${dev_pw:-<see below>})
+    Grafana      http://grafana.dev.local       (admin / admin)
+    todo-app     http://todo-app.dev.local
+  PROD cluster (its own Argo CD)
+    Argo CD      http://argo.prod.local         (admin / ${prod_pw:-<see below>})
+    Grafana      http://grafana.prod.local      (admin / admin)
+    todo-app     http://todo-app.prod.local
 ------------------------------------------------------------------
-  Argo CD admin password:
-    kubectl --context kind-management -n argocd get secret \\
-      argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
-  Watch sync:  argocd app list   (after: argocd login argo.dev.local)
-  Tip:         k9s --context kind-management
+  Argo CD admin password (per cluster):
+    kubectl --context kind-dev  -n argocd get secret argocd-initial-admin-secret \\
+      -o jsonpath='{.data.password}' | base64 -d
+    kubectl --context kind-prod -n argocd get secret argocd-initial-admin-secret \\
+      -o jsonpath='{.data.password}' | base64 -d
+  Tip:  k9s --context kind-dev   |   k9s --context kind-prod
 ==================================================================
 EOF
 }
@@ -469,21 +493,20 @@ EOF
 # -----------------------------------------------------------------------------
 main() {
   log "Starting GitOps Enterprise Lab install"
-  check_deps          # 0
-  install_tools       # 1
-  setup_aws_profile   # local AWS 'floci' profile in ~/.aws
-  setup_floci         # local AWS (floci) — start before workloads need it
-  seed_floci          # SSM params + ECR repos
-  create_clusters     # 2
-  install_metallb     # 3
-  install_ingress     # 4
-  install_gitea       # 5 (+ seed repos)
-  install_argocd      # 6
-  register_cluster "$DEV_CLUSTER"   # 7
-  register_cluster "$PROD_CLUSTER"  # 8
-  bootstrap_root      # 9
-  setup_dns           # 10a
-  output              # 10b
+  check_deps             # 0
+  install_tools          # 1
+  setup_aws_profile      # local AWS 'floci' profile in ~/.aws
+  setup_floci            # start floci (local AWS)
+  seed_floci             # SSM params + ECR repo
+  create_clusters        # 2  (management, dev, prod)
+  install_metallb        # 3
+  install_ingress        # 4
+  install_gitea          # 5  (+ seed platform-config, gitops-apps, app repo)
+  install_argocd         # 6  (one Argo per env: dev, prod)
+  build_and_load_image   # 7  (todo-app image -> kind)
+  bootstrap_root         # 8  (per-cluster app-of-apps)
+  setup_dns              # 9
+  output                 # 10
 }
 
 main "$@"
