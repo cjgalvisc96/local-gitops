@@ -385,12 +385,17 @@ setup_dns() {
     [app2.prod.local]="$PROD_IP"
   )
 
+  # System-level split DNS via dnsmasq + systemd-resolved (so the whole host,
+  # CLIs, etc. resolve the lab domains)...
   if require_cmd dnsmasq && systemctl is-active --quiet systemd-resolved; then
     setup_dns_dnsmasq
   else
-    warn "dnsmasq or systemd-resolved unavailable; falling back to /etc/hosts"
-    setup_dns_hosts
+    warn "dnsmasq or systemd-resolved unavailable; relying on /etc/hosts only"
   fi
+  # ...AND /etc/hosts, because browsers with "Secure DNS"/DoH bypass the system
+  # resolver and would otherwise never reach dnsmasq. /etc/hosts is honored
+  # regardless, so the UIs work in the browser without disabling DoH.
+  setup_dns_hosts
 }
 
 setup_dns_dnsmasq() {
