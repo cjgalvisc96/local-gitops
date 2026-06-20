@@ -54,15 +54,23 @@ prune_floci() {
   require_cmd docker || return
   step "Stopping floci (local AWS emulator) + spawned helpers"
   # floci and every helper it spawns (ECR registry, RDS postgres, ...) are
-  # name-prefixed 'floci'. Remove them all, with their anonymous volumes.
-  local names
+  # name-prefixed 'floci'.
+  local names vols
   names="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^floci' || true)"
   if [ -n "$names" ]; then
+    # Capture the volumes (named + anonymous) these containers mount BEFORE
+    # deleting them, so nothing is orphaned.
+    vols="$(echo "$names" | xargs -r docker inspect \
+      -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' 2>/dev/null)"
     echo "$names" | xargs -r docker rm -f -v >/dev/null 2>&1 \
       && log "removed floci container(s): $(echo "$names" | tr '\n' ' ')" || true
   else
     log "no floci containers present"
   fi
+  # Remove the captured volumes plus any floci-named volume left behind.
+  { printf '%s\n' $vols; docker volume ls -q 2>/dev/null | grep -E '^floci'; } \
+    | sort -u | grep -v '^$' | xargs -r docker volume rm -f >/dev/null 2>&1 \
+    && log "removed floci volumes" || true
   # floci's own image plus the helper images it pulls.
   for img in "$FLOCI_IMAGE" $FLOCI_HELPER_IMAGES; do
     if docker image inspect "$img" >/dev/null 2>&1; then
