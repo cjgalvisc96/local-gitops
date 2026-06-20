@@ -4,9 +4,13 @@
 
 A TODO application built with **Modular Monolithic architecture** following **Domain-Driven Design (DDD)** principles. The system is organized into clearly bounded contexts with strict separation between domain logic, presentation layers, and infrastructure concerns.
 
+### Design Principles
+The codebase follows industry standards and **SOLID, DRY, KISS, and YAGNI**, using established design patterns (builder, ports & adapters, CQRS, dependency injection) only where they genuinely reduce complexity or duplication. Abstraction is introduced to solve a present problem, never a hypothetical future one — unnecessary indirection and overengineering are treated as defects rather than sophistication.
+
 ### Bounded Contexts
 - **Users** — identity, authentication, authorization
 - **Tasks** — core TODO domain logic
+- **AI** — Bedrock-backed AI interactions (e.g. task suggestions), isolated from `tasks`/`users` infrastructure concerns
 - **Shared** — cross-cutting kernel (value objects, base entities, common utilities)
 
 ---
@@ -44,6 +48,11 @@ CORS_*
 CACHE_ENABLE=true
 CACHE_NAMESPACES
 REDIS_*
+AWS_REGION
+COGNITO_USER_POOL_ID
+COGNITO_APP_CLIENT_ID
+COGNITO_DOMAIN
+BEDROCK_MODEL_ID
 ```
 
 ---
@@ -124,10 +133,36 @@ A `Taskfile` serving as the central command runner, including:
 Centralized in a **base model** to enforce consistency across the domain:
 - Soft deletes (`deleted_at`)
 - Audit trail
-- Tenant isolation
+- Tenant isolation — `tenant_id` column on every tenant-owned table, **enforced at the database via PostgreSQL Row-Level Security (RLS)**, not just application-layer filtering
 - Timestamps (`created_at`, `updated_at`)
 - Transaction management
 - **CQRS-style separation**: distinct read and write models
+
+### Identity, Tenancy & Authorization
+
+A single chain carries tenant and role context from login through to every query:
+
+```
+Identity
+One Cognito User Pool
+    ↓
+tenant_id claim
+    ↓
+Role/group claims
+
+Database
+Shared PostgreSQL schema
+    ↓
+tenant_id on every tenant-owned table
+    ↓
+PostgreSQL RLS enforcement
+```
+
+- **One Cognito User Pool** for the whole application — not per-tenant pools. Multi-tenancy is expressed via claims, not infrastructure duplication.
+- A **pre-token-generation Lambda** injects a `tenant_id` custom claim and role/group claims into every issued JWT.
+- The API verifies the JWT and reads `tenant_id` and role claims via `api/dependencies.py` (authentication) and a tenant-binding middleware (authorization context).
+- That `tenant_id` is bound to the active database transaction (`SET LOCAL app.tenant_id = ...`), and **PostgreSQL RLS policies** — not application code — are the actual enforcement boundary: every tenant-owned table rejects rows that don't match the session's `tenant_id`, regardless of what a repository's query does or doesn't filter on.
+- Role/group claims from Cognito drive authorization (permission checks), separate from the tenant isolation mechanism.
 
 ### CLI
 - **Typer**-based CLI for operational/admin commands
@@ -138,14 +173,27 @@ Centralized in a **base model** to enforce consistency across the domain:
 
 ---
 
+## 6.1 AI Bounded Context (Amazon Bedrock)
+
+A dedicated `ai` bounded context — peer to `users` and `tasks`, not a feature bolted onto either:
+
+- **Domain** — defines an LLM client **port** (interface) that the domain layer depends on, with no awareness that Bedrock or AWS is the implementation. Entities such as `AiSuggestion` model the inputs/outputs of an AI interaction.
+- **Application** — use cases (e.g. generating a task suggestion) that call the port, independent of how it's implemented.
+- **Infrastructure** — a Bedrock adapter (via `boto3`) implementing the port, invoking a Bedrock model from within the cluster (a dedicated pod/deployment scoped to this context).
+- **Cross-context access** — when a use case needs task context (e.g. "suggest a next task based on existing ones"), the `ai` context receives a read-only dependency on `tasks`, wired explicitly at the root `ApplicationContainer` — the same explicit-wiring pattern used for any other cross-context dependency.
+- **Exposure** — surfaced through its own `api/v1/ai/` router and CLI command, going through the same authentication/authorization and tenant-binding path as every other request.
+
+---
+
 ## 7. Testing
 
 - **pytest** with **aiosqlite** for test database isolation
-- Test pyramid distribution:
+- Test pyramid distribution, applied per bounded context (`users`, `tasks`, `ai`, `shared`):
   - **Unit tests** — 100% coverage target
   - **Integration tests** — ~10% of suite
   - **End-to-end tests** — ~1% of suite
 - Each layer covers **happy paths, edge cases, and error scenarios**
+- `ai` context unit tests rely on a fake `LlmClient` port implementation — no live Bedrock calls in unit/integration tiers, only in a gated e2e/smoke suite
 - Overall coverage target: **>97%**
 
 ---
@@ -195,12 +243,20 @@ Centralized in a **base model** to enforce consistency across the domain:
 - Aurora (with public and private subnets)
 - Route 53
 - Secrets Manager
-- Cognito (SSO authentication and RBAC authorization)
+- **Cognito** — single User Pool, app client, pre-token-generation Lambda (injects `tenant_id` + role claims), groups for RBAC authorization
 - CDN
 - S3
 - EventBridge (background/async tasks)
 - SQS / SNS
-- Bedrock (AI capabilities)
+- Bedrock (AI capabilities, consumed by the `ai` bounded context)
+
+### IAM (Least Privilege via IRSA)
+Every workload gets a narrowly scoped role bound to its Kubernetes ServiceAccount via IRSA — no shared or account-wide execution role:
+- **API pod role** — Aurora access (IAM database authentication) and read-only access to its specific Secrets Manager secrets
+- **AI pod role** — `bedrock:InvokeModel` only, scoped to specific model ARNs; no S3, no broader Bedrock permissions
+- **DB-init Job role** — schema/DDL execution and Secrets Manager read only; explicitly no access to application data tables at runtime
+- **EventBridge-publishing role** — publish-only permission to a specific event bus, no subscribe/manage permissions
+- All roles defined as discrete Terraform modules under `infra/terraform/modules/iam/`, reviewed independently of the resources they grant access to
 
 ### Infrastructure Tooling
 - **Terraform Validate** — syntax/configuration validation
