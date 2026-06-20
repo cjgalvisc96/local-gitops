@@ -49,6 +49,7 @@ export FLOCI_HOST_ENDPOINT="http://localhost:${FLOCI_PORT}"
 # host is reachable from pods via the kind bridge gateway (172.18.0.1).
 export FLOCI_CLUSTER_ENDPOINT="http://172.18.0.1:${FLOCI_PORT}"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
+export AWS_PROFILE_NAME="floci"   # local profile created in ~/.aws by install.sh
 
 # Repo root (directory containing install.sh)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

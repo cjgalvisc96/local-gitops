@@ -72,6 +72,39 @@ install_tools() {
 }
 
 # -----------------------------------------------------------------------------
+# Local AWS 'floci' profile in ~/.aws (created by default, idempotent)
+# -----------------------------------------------------------------------------
+setup_aws_profile() {
+  step "Configuring local AWS '${AWS_PROFILE_NAME}' profile (~/.aws)"
+  local cfg="$HOME/.aws/config" creds="$HOME/.aws/credentials"
+  mkdir -p "$HOME/.aws"
+  if grep -q "^\[profile ${AWS_PROFILE_NAME}\]" "$cfg" 2>/dev/null; then
+    log "profile '${AWS_PROFILE_NAME}' already in ~/.aws/config"
+  else
+    cat >>"$cfg" <<EOF
+
+[profile ${AWS_PROFILE_NAME}]
+region = ${AWS_REGION}
+output = json
+endpoint_url = ${FLOCI_HOST_ENDPOINT}
+EOF
+    log "added [profile ${AWS_PROFILE_NAME}] to ~/.aws/config"
+  fi
+  if grep -q "^\[${AWS_PROFILE_NAME}\]" "$creds" 2>/dev/null; then
+    log "profile '${AWS_PROFILE_NAME}' already in ~/.aws/credentials"
+  else
+    cat >>"$creds" <<EOF
+
+[${AWS_PROFILE_NAME}]
+aws_access_key_id = test
+aws_secret_access_key = test
+EOF
+    chmod 600 "$creds"
+    log "added [${AWS_PROFILE_NAME}] to ~/.aws/credentials"
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # floci (local AWS) — start the emulator container
 # -----------------------------------------------------------------------------
 setup_floci() {
@@ -302,7 +335,8 @@ seed_floci() {
   if ! require_cmd aws; then warn "aws CLI not found; skipping floci seeding"; return; fi
   local ep="$FLOCI_HOST_ENDPOINT"
   if ! curl -sf "${ep}" >/dev/null 2>&1; then warn "floci not reachable at ${ep}; skipping seeding"; return; fi
-  export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION="$AWS_REGION"
+  # Use the local 'floci' profile created by setup_aws_profile.
+  export AWS_PROFILE="$AWS_PROFILE_NAME"
 
   # SSM Parameter Store values consumed by the ExternalSecrets in each env.
   for env in dev prod; do
@@ -432,6 +466,7 @@ main() {
   log "Starting GitOps Enterprise Lab install"
   check_deps          # 0
   install_tools       # 1
+  setup_aws_profile   # local AWS 'floci' profile in ~/.aws
   setup_floci         # local AWS (floci) — start before workloads need it
   seed_floci          # SSM params + ECR repos
   create_clusters     # 2
