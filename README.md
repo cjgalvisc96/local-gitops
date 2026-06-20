@@ -56,7 +56,7 @@ Argo CD → register dev/prod → bootstrap root app → DNS → print URLs.
 
 | URL | What |
 |-----|------|
-| http://gitea.dev.local | Gitea (`admin` / `adminadmin1`) |
+| http://gitea.dev.local | Gitea (`gitea_admin` / `adminadmin1`) |
 | http://argo.dev.local · http://argo.prod.local | Argo CD (`admin` / see below) |
 | http://grafana.dev.local · http://grafana.prod.local | Grafana |
 | http://app1.dev.local · http://app2.dev.local | DEV apps |

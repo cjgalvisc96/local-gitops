@@ -14,7 +14,8 @@ ingress:
 
 gitea:
   admin:
-    username: admin
+    # 'admin' is a reserved username in Gitea — use a non-reserved name.
+    username: gitea_admin
     password: adminadmin1
     email: admin@gitops.local
   config:
@@ -22,6 +23,8 @@ gitea:
       DOMAIN: gitea.dev.local
       ROOT_URL: http://gitea.dev.local/
       # Argo CD clones over the in-cluster service DNS, not the ingress host.
+    database:
+      DB_TYPE: sqlite3        # built-in DB: no subchart, no extra image, fast
     service:
       DISABLE_REGISTRATION: true
     webhook:
@@ -31,20 +34,16 @@ gitea:
 persistence:
   enabled: false
 
+# Disable all bundled datastores. The Bitnami PostgreSQL/Redis images were pulled
+# from Docker Hub's public catalog in 2025 (ImagePullBackOff), and SQLite is
+# plenty for a single-replica local lab.
 postgresql-ha:
   enabled: false
 postgresql:
-  enabled: true
-  primary:
-    persistence:
-      enabled: false
-  auth:
-    postgresPassword: giteaadmin
-    username: gitea
-    password: giteaadmin
-    database: gitea
-
+  enabled: false
 redis-cluster:
+  enabled: false
+redis:
   enabled: false
 
 resources:

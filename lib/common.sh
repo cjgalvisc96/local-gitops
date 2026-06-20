@@ -34,7 +34,7 @@ export RESOLVED_DROPIN="/etc/systemd/resolved.conf.d/gitops-lab.conf"
 export LAB_DOMAINS=("dev.local" "prod.local")
 
 # Gitea
-export GITEA_ADMIN_USER="admin"
+export GITEA_ADMIN_USER="gitea_admin"   # 'admin' is reserved in Gitea
 export GITEA_ADMIN_PASSWORD="adminadmin1"
 export GITEA_ORG="gitops"
 export GITEA_REPOS=("platform-config" "gitops-apps")
