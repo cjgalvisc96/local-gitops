@@ -238,12 +238,17 @@ seed_gitea() {
     create_gitea_repo "$repo" "$auth" "$base"
     push_repo "$repo" "${REPO_ROOT}/${repo}"
   done
-  # The application repo (external git repo with its own Helm chart).
-  if [ -d "$APP_REPO_PATH" ]; then
-    create_gitea_repo "$APP_REPO_NAME" "$auth" "$base"
-    push_app_repo
+  # The application repo (external git repo with its own Helm chart) — only when
+  # the app deployment is enabled.
+  if [ "$DEPLOY_APP" = "true" ]; then
+    if [ -d "$APP_REPO_PATH" ]; then
+      create_gitea_repo "$APP_REPO_NAME" "$auth" "$base"
+      push_app_repo
+    else
+      warn "app repo not found at $APP_REPO_PATH; skipping (set APP_REPO_PATH)"
+    fi
   else
-    warn "app repo not found at $APP_REPO_PATH; skipping (set APP_REPO_PATH to deploy it)"
+    log "DEPLOY_APP=false; skipping todo-app repo mirror"
   fi
   kill "$pf" >/dev/null 2>&1 || true
   trap - RETURN
@@ -263,6 +268,12 @@ push_repo() {
   log "pushing '$repo' to Gitea"
   local tmp; tmp="$(mktemp -d)"
   cp -r "$src/." "$tmp/"
+  # When the app deployment is disabled, don't ship the todo-app / dependency
+  # Applications, so the per-cluster Argo never deploys them.
+  if [ "$repo" = "platform-config" ] && [ "$DEPLOY_APP" != "true" ]; then
+    rm -f "$tmp"/envs/*/todo-app.yaml "$tmp"/envs/*/dependencies.yaml
+    log "  (DEPLOY_APP=false: omitting todo-app + dependencies)"
+  fi
   (
     cd "$tmp"
     git init -q -b main
@@ -317,6 +328,10 @@ install_argocd() {
 # -----------------------------------------------------------------------------
 build_and_load_image() {
   step "7. Building & loading the todo-app image"
+  if [ "$DEPLOY_APP" != "true" ]; then
+    log "DEPLOY_APP=false; skipping app image build (set DEPLOY_APP=true to deploy)"
+    return
+  fi
   if [ ! -d "$APP_REPO_PATH" ]; then
     warn "app repo not found at $APP_REPO_PATH; skipping image build"
     return
@@ -464,6 +479,11 @@ output() {
     -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
   prod_pw="$(kc "$PROD_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
     -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  local dev_app="" prod_app=""
+  if [ "$DEPLOY_APP" = "true" ]; then
+    dev_app=$'\n    todo-app     http://todo-app.dev.local'
+    prod_app=$'\n    todo-app     http://todo-app.prod.local'
+  fi
   cat <<EOF
 
 ==================================================================
@@ -473,12 +493,10 @@ output() {
     Gitea        http://gitea.dev.local         ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
   DEV cluster (its own Argo CD)
     Argo CD      http://argo.dev.local          (admin / ${dev_pw:-<see below>})
-    Grafana      http://grafana.dev.local       (admin / admin)
-    todo-app     http://todo-app.dev.local
+    Grafana      http://grafana.dev.local       (admin / admin)${dev_app}
   PROD cluster (its own Argo CD)
     Argo CD      http://argo.prod.local         (admin / ${prod_pw:-<see below>})
-    Grafana      http://grafana.prod.local      (admin / admin)
-    todo-app     http://todo-app.prod.local
+    Grafana      http://grafana.prod.local      (admin / admin)${prod_app}
 ------------------------------------------------------------------
   Argo CD admin password (per cluster):
     kubectl --context kind-dev  -n argocd get secret argocd-initial-admin-secret \\
