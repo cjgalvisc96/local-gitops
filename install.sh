@@ -12,6 +12,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source lib/common.sh
+ensure_mise_path   # make any already-installed mise toolchain callable
 
 # -----------------------------------------------------------------------------
 # 0. Verify dependencies (Docker, Git, Curl)
@@ -27,48 +28,74 @@ check_deps() {
 }
 
 # -----------------------------------------------------------------------------
-# 1. Install missing tools (kubectl, kind, helm, k9s, argocd)
+# 1. Install the CLI toolchain via mise (kubectl, kind, helm, k9s, argocd,
+#    kustomize, awscli, task, trivy — all pinned in mise.toml).
+#
+# mise is cross-distro (Debian, Fedora, Arch, RedHat, macOS), so this single
+# path replaces the old per-tool curl/unzip dance. dnsmasq is a system package,
+# so it goes through the host package manager instead.
 # -----------------------------------------------------------------------------
 install_tools() {
-  step "1. Installing missing tools"
-  local arch; arch="$(uname -m)"; [ "$arch" = "x86_64" ] && arch="amd64"; [ "$arch" = "aarch64" ] && arch="arm64"
-  local os; os="$(uname | tr '[:upper:]' '[:lower:]')"
+  step "1. Installing the CLI toolchain via mise"
 
-  if ! require_cmd kubectl; then
-    log "installing kubectl ${KUBECTL_VERSION}"
-    curl -sSLf "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${os}/${arch}/kubectl" -o /tmp/kubectl
-    sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+  if ! require_cmd mise && [ ! -x "$HOME/.local/bin/mise" ]; then
+    log "installing mise (https://mise.run)"
+    curl -sSf https://mise.run | sh
   fi
-  if ! require_cmd kind; then
-    log "installing kind"
-    curl -sSLf "https://kind.sigs.k8s.io/dl/v0.24.0/kind-${os}-${arch}" -o /tmp/kind
-    sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+  ensure_mise_path
+  require_cmd mise || die "mise install failed; see https://mise.jdx.dev for manual setup."
+  log "mise $(mise --version 2>/dev/null) ready"
+
+  # Install every pinned tool GLOBALLY (active on PATH anywhere, not just in this
+  # repo dir). `mise use -g` writes the pin to ~/.config/mise/config.toml and
+  # installs it. Done per-tool so a single unavailable release doesn't abort the
+  # whole run — the essential-tools check below is the real gate.
+  mise trust "${REPO_ROOT}/mise.toml" >/dev/null 2>&1 || true
+  log "installing pinned tools globally (mise use -g) — this can take a minute"
+  local t
+  while read -r t; do
+    [ -z "$t" ] && continue
+    log "  $t"
+    mise use --global "$t" >/dev/null 2>&1 || warn "could not install $t (skipped)"
+  done < <(mise_tool_args)
+  mise reshim >/dev/null 2>&1 || true
+  ensure_mise_path   # re-assert in case reshim created the shims dir just now
+  setup_mise_shell   # activate mise in the user's shell so tools are global
+
+  # dnsmasq isn't a mise tool; pull it from the host package manager if missing
+  # (used by setup_dns for system-wide *.dev.local / *.prod.local resolution).
+  if ! require_cmd dnsmasq; then
+    pkg_install dnsmasq || warn "could not install dnsmasq; DNS will fall back to /etc/hosts only"
   fi
-  if ! require_cmd helm; then
-    log "installing helm"
-    curl -sSLf https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+  # Sanity-check the tools the rest of the install depends on.
+  for t in kubectl kind helm argocd; do
+    require_cmd "$t" || die "tool '$t' not on PATH after mise install (PATH=$PATH)"
+  done
+  require_cmd aws || warn "aws CLI not available; floci SSM/ECR seeding will be skipped"
+}
+
+# Activate mise in the user's shell rc so the globally-pinned tools are on PATH
+# in every new terminal (idempotent; what `mise doctor` checks for).
+setup_mise_shell() {
+  local sh rc
+  sh="$(basename "${SHELL:-bash}")"
+  case "$sh" in
+    zsh)  rc="$HOME/.zshrc" ;;
+    fish) rc="$HOME/.config/fish/config.fish" ;;
+    *)    rc="$HOME/.bashrc"; sh="bash" ;;
+  esac
+  if [ -f "$rc" ] && grep -q 'mise activate' "$rc" 2>/dev/null; then
+    log "mise already activated in $rc"
+    return
   fi
-  if ! require_cmd k9s; then
-    log "installing k9s"
-    curl -sSLf "https://github.com/derailed/k9s/releases/latest/download/k9s_$(uname)_${arch}.tar.gz" -o /tmp/k9s.tgz
-    tar -xzf /tmp/k9s.tgz -C /tmp k9s
-    sudo install -m 0755 /tmp/k9s /usr/local/bin/k9s
+  mkdir -p "$(dirname "$rc")"
+  if [ "$sh" = "fish" ]; then
+    printf '\n# gitops-lab install.sh — activate global mise tools\nmise activate fish | source\n' >>"$rc"
+  else
+    printf '\n# gitops-lab install.sh — activate global mise tools\neval "$(mise activate %s)"\n' "$sh" >>"$rc"
   fi
-  if ! require_cmd argocd; then
-    log "installing argocd CLI"
-    curl -sSLf "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-${os}-${arch}" -o /tmp/argocd
-    sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
-  fi
-  if ! require_cmd aws; then
-    if require_cmd unzip; then
-      log "installing AWS CLI v2 (for floci seeding)"
-      curl -sSLf "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
-      unzip -q -o /tmp/awscliv2.zip -d /tmp
-      sudo /tmp/aws/install --update
-    else
-      warn "aws CLI and unzip both missing; floci SSM/ECR seeding will be skipped"
-    fi
-  fi
+  log "added 'mise activate $sh' to $rc — open a new shell (or 'exec $sh') to use the tools globally"
 }
 
 # -----------------------------------------------------------------------------
@@ -118,6 +145,8 @@ setup_floci() {
       -p "${FLOCI_PORT}:${FLOCI_PORT}" \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -u root \
+      --label "com.docker.compose.project=${PROJECT_NAME}" \
+      --label "com.docker.compose.service=floci" \
       "$FLOCI_IMAGE" >/dev/null
   fi
   log "waiting for floci endpoint ${FLOCI_HOST_ENDPOINT} ..."
@@ -141,6 +170,29 @@ create_clusters() {
       kind create cluster --name "$c" --image "$NODE_IMAGE" --config "clusters/$c.yaml" --wait 120s
     fi
   done
+}
+
+# -----------------------------------------------------------------------------
+# 2b. Detect the kind bridge subnet and derive all addresses from it.
+#     kind creates the "kind" docker network on first cluster; if 172.18.0.0/16
+#     is taken (e.g. by the todo-app compose net), it lands elsewhere and we
+#     must follow — the pinned Gitea LB + floci gateway have to be on-subnet.
+# -----------------------------------------------------------------------------
+detect_network() {
+  step "2b. Detecting kind network subnet"
+  local subnet prefix
+  subnet="$(docker network inspect kind --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.' | head -1)"
+  if [ -z "$subnet" ]; then
+    warn "could not read kind network subnet; assuming default ${DEFAULT_NET_PREFIX}.0.0/16"
+    return
+  fi
+  prefix="$(echo "$subnet" | cut -d. -f1,2)"
+  apply_net_prefix "$prefix"
+  log "kind bridge ${subnet} -> prefix=${NET_PREFIX} gitea_lb=${GITEA_GIT_IP} floci_gw=${FLOCI_GW}"
+  [ "$NET_PREFIX" != "$DEFAULT_NET_PREFIX" ] \
+    && log "(differs from committed ${DEFAULT_NET_PREFIX}; manifests rewritten on apply/push)"
+  return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -208,8 +260,9 @@ install_gitea() {
     -f bootstrap/gitea/values.yaml \
     --wait --timeout 600s
   kc "$MGMT_CLUSTER" apply -f bootstrap/gitea/ingress.yaml
-  # Pinned LB so the dev/prod Argo instances can clone Gitea cross-cluster.
-  kc "$MGMT_CLUSTER" apply -f bootstrap/gitea/git-lb.yaml
+  # Pinned LB so the dev/prod Argo instances can clone Gitea cross-cluster
+  # (the pinned IP is rewritten to the live subnet when it differs from default).
+  subst_net < bootstrap/gitea/git-lb.yaml | kc "$MGMT_CLUSTER" apply -f -
   seed_gitea
 }
 
@@ -274,6 +327,8 @@ push_repo() {
     rm -f "$tmp"/envs/*/todo-app.yaml "$tmp"/envs/*/dependencies.yaml
     log "  (DEPLOY_APP=false: omitting todo-app + dependencies)"
   fi
+  # Rewrite the pinned Gitea LB IP / floci gateway to the live kind subnet.
+  subst_net_tree "$tmp"
   (
     cd "$tmp"
     git init -q -b main
@@ -318,8 +373,37 @@ install_argocd() {
     kc "$c" apply -f bootstrap/argocd/argocd-rbac.yaml
     kc "$c" apply -f "bootstrap/argocd/ingress-${c}.yaml"
     kc "$c" wait --for=condition=Established crd/applications.argoproj.io --timeout=180s
+    register_gitea_repos "$c"
     kc "$c" -n argocd rollout restart deploy/argocd-server
     kc "$c" -n argocd rollout status deploy/argocd-server --timeout=300s
+  done
+}
+
+# Connect this cluster's Argo CD to the local Gitea over the pinned cross-cluster
+# git URL (GITEA_GIT_URL). Argo then shows the repos as "Connected" and uses the
+# Gitea URL as the default source. The secrets are rendered from lib/common.sh at
+# install time (no secret values committed to Git).
+register_gitea_repos() {
+  local c="$1" repo
+  local repos=("${GITEA_REPOS[@]}")
+  [ "$DEPLOY_APP" = "true" ] && repos+=("$APP_REPO_NAME")
+  log "[$c] linking Argo CD to Gitea (${GITEA_GIT_URL})"
+  for repo in "${repos[@]}"; do
+    kc "$c" apply -f - <<EOF >/dev/null
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-${repo}
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  name: ${repo}
+  url: ${GITEA_GIT_URL}/${repo}.git
+  username: ${GITEA_ADMIN_USER}
+  password: ${GITEA_ADMIN_PASSWORD}
+EOF
   done
 }
 
@@ -357,7 +441,7 @@ bootstrap_root() {
   step "8. Bootstrapping per-cluster root Applications"
   for c in "${ARGO_CLUSTERS[@]}"; do
     log "[$c] applying root app (envs/$c)"
-    kc "$c" apply -f "bootstrap/argocd/root-${c}.yaml"
+    subst_net < "bootstrap/argocd/root-${c}.yaml" | kc "$c" apply -f -
   done
   log "Each Argo CD now reconciles its env from platform-config/envs/<env>."
 }
@@ -470,6 +554,59 @@ setup_dns_hosts() {
 }
 
 # -----------------------------------------------------------------------------
+# 9b. One-time reconcile — wait until every Argo CD app is Synced & Healthy so
+#     the lab is ready to use the moment install.sh / `task install` returns.
+# -----------------------------------------------------------------------------
+reconcile() {
+  step "9b. Reconciling Argo CD applications (one-time)"
+  for c in "${ARGO_CLUSTERS[@]}"; do
+    # The root app must sync first — it's what creates the child Applications.
+    nudge_until_healthy "$c" "root"
+    # Then wait for the whole app tree (root + children) to settle.
+    nudge_until_healthy "$c"
+  done
+  log "All applications reconciled — the lab is ready to work."
+}
+
+# nudge_until_healthy <cluster> [app]
+# Hard-refresh the target app(s) (which triggers their automated sync) and poll
+# until everything is Synced & Healthy, or a timeout elapses (then warn + go on).
+nudge_until_healthy() {
+  local c="$1" only="${2:-}"
+  local label="${only:-all apps}"
+  local deadline=$(( SECONDS + 480 ))
+  log "[$c] reconciling ${label}..."
+  while :; do
+    local targets pending=0 total=0 app s h
+    if [ -n "$only" ]; then
+      targets="application.argoproj.io/${only}"
+    else
+      targets="$(kc "$c" -n argocd get applications.argoproj.io -o name 2>/dev/null || true)"
+    fi
+    while read -r app; do
+      [ -z "$app" ] && continue
+      total=$((total + 1))
+      s="$(kc "$c" -n argocd get "$app" -o jsonpath='{.status.sync.status}'   2>/dev/null || true)"
+      h="$(kc "$c" -n argocd get "$app" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+      if [ "$s" != "Synced" ] || [ "$h" != "Healthy" ]; then
+        pending=$((pending + 1))
+        kc "$c" -n argocd annotate "$app" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+      fi
+    done <<< "$targets"
+    if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+      log "[$c] ${label}: Synced & Healthy"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      warn "[$c] ${label} not fully healthy within timeout; check 'task k8s:status'"
+      kc "$c" -n argocd get applications.argoproj.io 2>/dev/null || true
+      return 0
+    fi
+    sleep 10
+  done
+}
+
+# -----------------------------------------------------------------------------
 # 10b. Print URLs / credentials
 # -----------------------------------------------------------------------------
 output() {
@@ -517,6 +654,7 @@ main() {
   setup_floci            # start floci (local AWS)
   seed_floci             # SSM params + ECR repo
   create_clusters        # 2  (management, dev, prod)
+  detect_network         # 2b (derive pools/Gitea IP/floci gw from kind subnet)
   install_metallb        # 3
   install_ingress        # 4
   install_gitea          # 5  (+ seed platform-config, gitops-apps, app repo)
@@ -524,6 +662,7 @@ main() {
   build_and_load_image   # 7  (todo-app image -> kind)
   bootstrap_root         # 8  (per-cluster app-of-apps)
   setup_dns              # 9
+  reconcile              # 9b (one-time sync: wait until all apps are healthy)
   output                 # 10
 }
 

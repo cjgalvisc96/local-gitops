@@ -11,6 +11,7 @@ set -uo pipefail   # not -e: prune must continue past missing pieces
 
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 source lib/common.sh
+ensure_mise_path   # make the mise-managed toolchain (kind, kubectl, ...) callable
 
 REMOVE_TOOLS=0
 [ "${1:-}" = "--tools" ] && REMOVE_TOOLS=1
@@ -54,9 +55,14 @@ prune_floci() {
   require_cmd docker || return
   step "Stopping floci (local AWS emulator) + spawned helpers"
   # floci and every helper it spawns (ECR registry, RDS postgres, ...) are
-  # name-prefixed 'floci'.
+  # name-prefixed 'floci'; the main container is also tagged into the lab's
+  # Docker project, so match either signal.
   local names vols
-  names="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^floci' || true)"
+  names="$( {
+      docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^floci'
+      docker ps -a --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+        --format '{{.Names}}' 2>/dev/null
+    } | sort -u | grep -v '^$' || true )"
   if [ -n "$names" ]; then
     # Capture the volumes (named + anonymous) these containers mount BEFORE
     # deleting them, so nothing is orphaned.
@@ -125,6 +131,23 @@ prune_docker() {
 prune_tools() {
   [ "$REMOVE_TOOLS" -eq 1 ] || { log "keeping CLI tools (pass --tools to remove)"; return; }
   step "Removing installed CLI tools"
+  # The toolchain is mise-managed (mise.toml); install.sh pins it GLOBALLY, so
+  # uninstall each tool (all versions) AND drop its global pin.
+  if require_cmd mise && [ -f "$REPO_ROOT/mise.toml" ]; then
+    local t
+    while read -r t; do
+      [ -z "$t" ] && continue
+      t="${t%@*}"   # strip the @version, keep the tool name
+      mise uninstall --all "$t" >/dev/null 2>&1 || true
+      mise use --global --rm "$t" >/dev/null 2>&1 || true
+    done < <(mise_tool_args)
+    log "uninstalled mise-managed tools (and removed global pins)"
+  fi
+  # Remove the 'mise activate' line install.sh added to the shell rc(s).
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.config/fish/config.fish"; do
+    [ -f "$rc" ] && sed -i '/gitops-lab install.sh — activate global mise/{N;d}' "$rc" 2>/dev/null || true
+  done
+  # Clean up any binaries left by the old curl-based installer.
   for t in kubectl kind k9s argocd; do
     sudo rm -f "/usr/local/bin/$t" 2>/dev/null || true
   done

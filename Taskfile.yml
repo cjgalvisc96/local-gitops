@@ -1,0 +1,143 @@
+# =============================================================================
+# Taskfile for the GitOps Enterprise Lab — https://taskfile.dev
+#
+#   task                 # list available tasks
+#   task install         # build the whole lab (DEPLOY_APP=false by default)
+#   task k8s:trivy       # scan the dev cluster for vulnerabilities
+#   task k8s:status      # clusters + Argo CD app health at a glance
+#
+# The toolchain (kubectl, kind, helm, argocd, kustomize, trivy, task itself) is
+# pinned in mise.toml and installed by `task tools` / install.sh.
+# =============================================================================
+version: '3'
+
+vars:
+  CLUSTERS: management dev prod
+  ARGO_CLUSTERS: dev prod
+  ENV: '{{.ENV | default "dev"}}'
+
+tasks:
+  default:
+    desc: List all available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  # --- lifecycle ----------------------------------------------------------
+  tools:
+    desc: Install the pinned CLI toolchain via mise (mise.toml)
+    cmds:
+      - mise install
+      - mise reshim
+
+  install:
+    desc: Build the full lab (clusters, Gitea, per-cluster Argo CD, platform)
+    cmds:
+      - ./install.sh
+
+  install:app:
+    desc: Build the lab AND deploy the todo-app (DEPLOY_APP=true)
+    cmds:
+      - DEPLOY_APP=true ./install.sh
+
+  prune:
+    desc: Tear down clusters, floci, DNS and Docker artifacts
+    cmds:
+      - ./prune.sh
+
+  prune:all:
+    desc: Tear down everything AND uninstall the mise-managed CLI tools
+    cmds:
+      - ./prune.sh --tools
+
+  # --- validation ---------------------------------------------------------
+  validate:
+    desc: Render every overlay, parse YAML and lint the shell scripts
+    cmds:
+      - task: validate:kustomize
+      - task: validate:scripts
+
+  validate:kustomize:
+    desc: kustomize build every overlay (must render cleanly)
+    cmds:
+      - for: { var: KUSTOMIZE_DIRS }
+        cmd: 'echo "==> {{.ITEM}}" && kustomize build "{{.ITEM}}" >/dev/null'
+    vars:
+      KUSTOMIZE_DIRS: >-
+        gitops-apps/platform/overlays/dev
+        gitops-apps/platform/overlays/prod
+        gitops-apps/observability/overlays/dev
+        gitops-apps/observability/overlays/prod
+        gitops-apps/dependencies/base
+
+  validate:scripts:
+    desc: bash -n + shellcheck the shell scripts
+    cmds:
+      - bash -n install.sh prune.sh lib/common.sh
+      - 'command -v shellcheck >/dev/null && shellcheck -x install.sh prune.sh lib/common.sh || echo "(shellcheck not installed; skipped)"'
+
+  # --- kubernetes / argo --------------------------------------------------
+  k8s:status:
+    desc: Show clusters and Argo CD application health
+    cmds:
+      - 'echo "=== kind clusters ===" && kind get clusters'
+      - for: { var: ARGO_CLUSTERS }
+        cmd: 'echo "=== {{.ITEM}} apps ===" && kubectl --context kind-{{.ITEM}} -n argocd get applications.argoproj.io'
+
+  k8s:pods:
+    desc: List pods across all clusters (ENV=dev to scope to one cluster)
+    cmds:
+      - for: { var: CLUSTERS }
+        cmd: 'echo "=== {{.ITEM}} ===" && kubectl --context kind-{{.ITEM}} get pods -A'
+
+  k8s:apps:
+    desc: Show Argo CD applications for ENV (default dev)
+    cmds:
+      - kubectl --context kind-{{.ENV}} -n argocd get applications.argoproj.io
+
+  k8s:sync:
+    desc: Hard-refresh + sync every Argo app in ENV (default dev)
+    cmds:
+      - |
+        for app in $(kubectl --context kind-{{.ENV}} -n argocd get applications.argoproj.io -o name); do
+          kubectl --context kind-{{.ENV}} -n argocd annotate "$app" argocd.argoproj.io/refresh=hard --overwrite >/dev/null
+          kubectl --context kind-{{.ENV}} -n argocd patch "$app" --type merge -p '{"operation":{"sync":{}}}' >/dev/null
+          echo "synced $app"
+        done
+
+  k8s:trivy:
+    desc: 'Scan a cluster (ENV=dev) or an image (IMG=local/todo-app:dev) with Trivy'
+    cmds:
+      - |
+        if [ -n "{{.IMG}}" ]; then
+          trivy image "{{.IMG}}"
+        else
+          echo "Scanning kind-{{.ENV}} (pass IMG=<image> to scan a single image instead)"
+          trivy k8s --context kind-{{.ENV}} --report summary --scanners misconfig,vuln
+        fi
+
+  # --- argo cd helpers ----------------------------------------------------
+  argo:password:
+    desc: Print the Argo CD admin password for each workload cluster
+    cmds:
+      - for: { var: ARGO_CLUSTERS }
+        cmd: |
+          pw=$(kubectl --context kind-{{.ITEM}} -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
+          echo "kind-{{.ITEM}}: admin / $pw"
+
+  argo:repos:
+    desc: Show the Gitea repositories Argo CD is linked to (ENV=dev)
+    cmds:
+      - kubectl --context kind-{{.ENV}} -n argocd get secret -l argocd.argoproj.io/secret-type=repository
+
+  # --- dns ----------------------------------------------------------------
+  dns:test:
+    desc: Curl the lab ingress hosts to confirm DNS + routing
+    cmds:
+      - for:
+          - gitea.dev.local
+          - argo.dev.local
+          - grafana.dev.local
+          - argo.prod.local
+          - grafana.prod.local
+        cmd: 'printf "%-22s -> " "{{.ITEM}}"; curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://{{.ITEM}}" || echo "unreachable"'
