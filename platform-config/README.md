@@ -1,17 +1,28 @@
 # platform-config
 
-The **GitOps control repository**. Argo CD's `root` Application watches this repo
-and applies everything here to the management cluster:
+The **GitOps control repository**. Each workload cluster runs its own Argo CD,
+and that cluster's `root` Application (app-of-apps) watches one directory here:
 
 ```
-projects/           AppProjects (env separation: dev / prod)
-applicationsets/    ApplicationSets that fan workloads out to the dev & prod clusters
-  apps.yaml             application instances (app1, app2) x (dev, prod)
-  observability.yaml    OpenTelemetry + Prometheus + Grafana per env
-  platform.yaml         namespaces / ConfigMap / RBAC / SecretStore per env
-  external-secrets.yaml External Secrets Operator (Helm) per env
+envs/dev/    Argo Applications the DEV cluster's Argo CD reconciles
+envs/prod/   Argo Applications the PROD cluster's Argo CD reconciles
 ```
 
-ApplicationSets use the **cluster generator** with `environment in (dev, prod)`,
-so adding a workload cluster is just registering a labeled Argo cluster secret.
-Manifests they reference live in the `gitops-apps` repo.
+Every `envs/<env>/` holds, for that environment:
+
+```
+project.yaml           AppProject <env> (scopes sourceRepos to the Gitea repos)
+platform.yaml          → gitops-apps/platform/overlays/<env>
+observability.yaml     → gitops-apps/observability/overlays/<env>
+external-secrets.yaml  External Secrets Operator (Helm chart)
+dependencies.yaml      → gitops-apps/dependencies/base   (only with DEPLOY_APP=true)
+todo-app.yaml          the external app's Helm chart     (only with DEPLOY_APP=true)
+```
+
+The `root` app sets `directory.recurse: true`, so dropping a new `Application`
+into `envs/<env>/` is enough — no generators or ApplicationSets. The manifests
+these Applications point at live in the `gitops-apps` repo; Argo clones both
+repos from Gitea over its pinned LoadBalancer IP.
+
+Promote by proving a change in `envs/dev` (or its `gitops-apps` overlay) first,
+then mirroring it into the `prod` counterpart.

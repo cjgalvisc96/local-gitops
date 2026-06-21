@@ -12,9 +12,19 @@ Apply these whenever working in this repo.
 ## Structure
 - Apps & stacks are **base + per-env overlays** (Kustomize). Env-specific values
   live in the overlay, never hard-coded in the base.
-- One app per namespace; ingress hosts are `gitea|argo|grafana|appN.<env>.local`.
-- Versions (tools, charts, images) are pinned in `lib/common.sh` / manifests —
-  one source of truth, no floating `latest` in the GitOps layer.
+- One app per namespace; ingress hosts are `gitea|argo|grafana|<app>.<env>.local`.
+- Each workload cluster (dev, prod) runs its **own** Argo CD; its `root` app
+  recurses `platform-config/envs/<env>` (app-of-apps). No ApplicationSets — a new
+  stack is a new `Application` file in that dir. Management runs only Gitea.
+- Tool versions are pinned in `mise.toml` (installed globally by `install.sh`);
+  charts/images are pinned in `lib/common.sh` / manifests. One source of truth,
+  no floating `latest` in the GitOps layer. Drive workflows via `Taskfile.yml`.
+
+## Code style
+- Well-written code explains itself: prefer clear names and structure over
+  comments. Don't add banner/section comments or narrate the obvious.
+- Keep the rare comment that records a non-obvious *why* (a workaround, a
+  load-bearing marker string), never a *what*.
 
 ## Security
 - No secret values in Git. Use `ExternalSecret` → `ClusterSecretStore` (AWS SSM

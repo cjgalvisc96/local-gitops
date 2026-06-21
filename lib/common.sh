@@ -5,7 +5,6 @@ export PROD_CLUSTER="prod"
 export CLUSTERS=("$MGMT_CLUSTER" "$DEV_CLUSTER" "$PROD_CLUSTER")
 
 export NODE_IMAGE="kindest/node:v1.31.4"
-export KUBECTL_VERSION="v1.31.4"
 export ARGOCD_VERSION="v2.13.2"
 export METALLB_VERSION="v0.14.8"
 export INGRESS_NGINX_VERSION="4.11.3"
@@ -15,7 +14,6 @@ export DNS_PORT="5300"
 export DNS_PIDFILE="/tmp/gitops-dnsmasq.pid"
 export DNS_CONFFILE="/tmp/gitops-dnsmasq.conf"
 export RESOLVED_DROPIN="/etc/systemd/resolved.conf.d/gitops-lab.conf"
-export LAB_DOMAINS=("dev.local" "prod.local")
 
 export ARGO_CLUSTERS=("$DEV_CLUSTER" "$PROD_CLUSTER")
 
@@ -52,7 +50,6 @@ apply_net_prefix() {
   export GITEA_GIT_IP="${NET_PREFIX}.255.209"
   export GITEA_GIT_URL="http://${GITEA_GIT_IP}:3000/${GITEA_ORG}"
   export FLOCI_GW="${NET_PREFIX}.0.1"
-  export FLOCI_CLUSTER_ENDPOINT="http://${FLOCI_GW}:${FLOCI_PORT}"
 }
 apply_net_prefix "$DEFAULT_NET_PREFIX"
 
@@ -82,11 +79,6 @@ die()   { err "$*"; exit 1; }
 
 ctx() { echo "kind-$1"; }
 kc()  { kubectl --context "$(ctx "$1")" "${@:2}"; }
-
-cluster_internal_ip() {
-  docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-    "$1-control-plane" 2>/dev/null
-}
 
 require_cmd() { command -v "$1" >/dev/null 2>&1; }
 
