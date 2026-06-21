@@ -3,5 +3,9 @@ kind: Kustomization
 
 resources:
   - otel-collector.yaml
+  - otel-agent.yaml
   - prometheus.yaml
+  - loki.yaml
+  - tempo.yaml
+  - kube-state-metrics.yaml
   - grafana.yaml
