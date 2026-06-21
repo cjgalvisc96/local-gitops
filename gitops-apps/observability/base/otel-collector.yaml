@@ -32,7 +32,6 @@ metadata:
 data:
   config.yaml: |
     receivers:
-      # OTLP in — traces (and metrics/logs) from instrumented apps.
       otlp:
         protocols:
           grpc:
@@ -42,8 +41,6 @@ data:
       prometheus:
         config:
           scrape_configs:
-            # Application pods that carry prometheus.io/* annotations
-            # (kube-state-metrics is picked up here too).
             - job_name: kubernetes-pods
               kubernetes_sd_configs:
                 - role: pod
@@ -64,8 +61,6 @@ data:
                   target_label: namespace
                 - source_labels: [__meta_kubernetes_pod_name]
                   target_label: pod
-            # Per-container CPU/memory from each node's kubelet cAdvisor, via the
-            # apiserver proxy (uses the collector ServiceAccount token).
             - job_name: kubernetes-cadvisor
               scheme: https
               tls_config:
@@ -89,13 +84,11 @@ data:
       resourcedetection:
         detectors: [env, system]
     exporters:
-      # Re-expose collected series so Prometheus can scrape the collector.
       prometheus:
         endpoint: 0.0.0.0:8889
         send_timestamps: true
         resource_to_telemetry_conversion:
           enabled: true
-      # Forward traces to Tempo over OTLP.
       otlp/tempo:
         endpoint: tempo:4317
         tls:

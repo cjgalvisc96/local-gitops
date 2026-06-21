@@ -1,14 +1,3 @@
-# =============================================================================
-# Taskfile for the GitOps Enterprise Lab — https://taskfile.dev
-#
-#   task                 # list available tasks
-#   task install         # build the whole lab (DEPLOY_APP=false by default)
-#   task k8s:trivy       # scan the dev cluster for vulnerabilities
-#   task k8s:status      # clusters + Argo CD app health at a glance
-#
-# The toolchain (kubectl, kind, helm, argocd, kustomize, trivy, task itself) is
-# pinned in mise.toml and installed by `task tools` / install.sh.
-# =============================================================================
 version: '3'
 
 vars:
@@ -23,7 +12,6 @@ tasks:
       - task --list
     silent: true
 
-  # --- lifecycle ----------------------------------------------------------
   tools:
     desc: Install the pinned CLI toolchain via mise (mise.toml)
     cmds:
@@ -50,7 +38,6 @@ tasks:
     cmds:
       - ./prune.sh --tools
 
-  # --- validation ---------------------------------------------------------
   validate:
     desc: Render every overlay, parse YAML and lint the shell scripts
     cmds:
@@ -76,7 +63,6 @@ tasks:
       - bash -n install.sh prune.sh lib/common.sh
       - 'command -v shellcheck >/dev/null && shellcheck -x install.sh prune.sh lib/common.sh || echo "(shellcheck not installed; skipped)"'
 
-  # --- kubernetes / argo --------------------------------------------------
   k8s:status:
     desc: Show clusters and Argo CD application health
     cmds:
@@ -116,7 +102,6 @@ tasks:
           trivy k8s --context kind-{{.ENV}} --report summary --scanners misconfig,vuln
         fi
 
-  # --- argo cd helpers ----------------------------------------------------
   argo:password:
     desc: Print the Argo CD admin password for each workload cluster
     cmds:
@@ -130,7 +115,6 @@ tasks:
     cmds:
       - kubectl --context kind-{{.ENV}} -n argocd get secret -l argocd.argoproj.io/secret-type=repository
 
-  # --- dns ----------------------------------------------------------------
   dns:test:
     desc: Curl the lab ingress hosts to confirm DNS + routing
     cmds:

@@ -1,5 +1,3 @@
-# Minimal Postgres for the todo-app (the app chart expects DB_HOST=postgres).
-# Lab-grade: ephemeral storage, single replica, official image.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

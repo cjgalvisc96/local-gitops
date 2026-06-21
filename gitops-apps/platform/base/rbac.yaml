@@ -1,6 +1,3 @@
-# Namespace-scoped RBAC demonstrating least-privilege per tier.
-# A "deployer" ServiceAccount with full rights inside the application namespace,
-# and a read-only role for the observability namespace.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

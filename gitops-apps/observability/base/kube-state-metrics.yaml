@@ -1,6 +1,3 @@
-# kube-state-metrics — exposes Kubernetes object state as metrics (pod phases,
-# restarts, deployment replicas, ...). The prometheus.io annotations make the
-# existing OpenTelemetry Collector scrape it automatically.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

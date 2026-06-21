@@ -1,5 +1,3 @@
-# AppProject for the dev environment's Argo CD (runs in the dev cluster and
-# manages only that cluster, in-cluster).
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:

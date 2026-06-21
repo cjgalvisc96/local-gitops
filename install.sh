@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
-# =============================================================================
-# GitOps Enterprise Lab — one-command installer
-#
-# Builds a 3-cluster local GitOps platform:
-#   management : Gitea + Argo CD (the control plane)
-#   dev / prod : applications + OpenTelemetry + Prometheus + Grafana (GitOps-managed)
-#
-# Follows the steps in NEXT-STEPS.md (0..10). Idempotent: safe to re-run.
-# =============================================================================
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source lib/common.sh
-ensure_mise_path   # make any already-installed mise toolchain callable
+ensure_mise_path
 
-# -----------------------------------------------------------------------------
-# 0. Verify dependencies (Docker, Git, Curl)
-# -----------------------------------------------------------------------------
 check_deps() {
   step "0. Verifying dependencies"
   local missing=0
@@ -27,14 +15,6 @@ check_deps() {
   docker info >/dev/null 2>&1 || die "Docker daemon is not reachable (is it running / are you in the docker group?)."
 }
 
-# -----------------------------------------------------------------------------
-# 1. Install the CLI toolchain via mise (kubectl, kind, helm, k9s, argocd,
-#    kustomize, awscli, task, trivy — all pinned in mise.toml).
-#
-# mise is cross-distro (Debian, Fedora, Arch, RedHat, macOS), so this single
-# path replaces the old per-tool curl/unzip dance. dnsmasq is a system package,
-# so it goes through the host package manager instead.
-# -----------------------------------------------------------------------------
 install_tools() {
   step "1. Installing the CLI toolchain via mise"
 
@@ -46,10 +26,6 @@ install_tools() {
   require_cmd mise || die "mise install failed; see https://mise.jdx.dev for manual setup."
   log "mise $(mise --version 2>/dev/null) ready"
 
-  # Install every pinned tool GLOBALLY (active on PATH anywhere, not just in this
-  # repo dir). `mise use -g` writes the pin to ~/.config/mise/config.toml and
-  # installs it. Done per-tool so a single unavailable release doesn't abort the
-  # whole run — the essential-tools check below is the real gate.
   mise trust "${REPO_ROOT}/mise.toml" >/dev/null 2>&1 || true
   log "installing pinned tools globally (mise use -g) — this can take a minute"
   local t
@@ -59,24 +35,19 @@ install_tools() {
     mise use --global "$t" >/dev/null 2>&1 || warn "could not install $t (skipped)"
   done < <(mise_tool_args)
   mise reshim >/dev/null 2>&1 || true
-  ensure_mise_path   # re-assert in case reshim created the shims dir just now
-  setup_mise_shell   # activate mise in the user's shell so tools are global
+  ensure_mise_path
+  setup_mise_shell
 
-  # dnsmasq isn't a mise tool; pull it from the host package manager if missing
-  # (used by setup_dns for system-wide *.dev.local / *.prod.local resolution).
   if ! require_cmd dnsmasq; then
     pkg_install dnsmasq || warn "could not install dnsmasq; DNS will fall back to /etc/hosts only"
   fi
 
-  # Sanity-check the tools the rest of the install depends on.
   for t in kubectl kind helm argocd; do
     require_cmd "$t" || die "tool '$t' not on PATH after mise install (PATH=$PATH)"
   done
   require_cmd aws || warn "aws CLI not available; floci SSM/ECR seeding will be skipped"
 }
 
-# Activate mise in the user's shell rc so the globally-pinned tools are on PATH
-# in every new terminal (idempotent; what `mise doctor` checks for).
 setup_mise_shell() {
   local sh rc
   sh="$(basename "${SHELL:-bash}")"
@@ -98,9 +69,6 @@ setup_mise_shell() {
   log "added 'mise activate $sh' to $rc — open a new shell (or 'exec $sh') to use the tools globally"
 }
 
-# -----------------------------------------------------------------------------
-# Local AWS 'floci' profile in ~/.aws (created by default, idempotent)
-# -----------------------------------------------------------------------------
 setup_aws_profile() {
   step "Configuring local AWS '${AWS_PROFILE_NAME}' profile (~/.aws)"
   local cfg="$HOME/.aws/config" creds="$HOME/.aws/credentials"
@@ -131,9 +99,6 @@ EOF
   fi
 }
 
-# -----------------------------------------------------------------------------
-# floci (local AWS) — start the emulator container
-# -----------------------------------------------------------------------------
 setup_floci() {
   step "Setting up floci (local AWS emulator)"
   if docker ps --format '{{.Names}}' | grep -qx "$FLOCI_CONTAINER"; then
@@ -157,9 +122,6 @@ setup_floci() {
   warn "floci did not become ready in time; SSM-backed secrets may stay Missing"
 }
 
-# -----------------------------------------------------------------------------
-# 2. Create clusters (management, dev, prod)
-# -----------------------------------------------------------------------------
 create_clusters() {
   step "2. Creating kind clusters"
   for c in "${CLUSTERS[@]}"; do
@@ -172,12 +134,6 @@ create_clusters() {
   done
 }
 
-# -----------------------------------------------------------------------------
-# 2b. Detect the kind bridge subnet and derive all addresses from it.
-#     kind creates the "kind" docker network on first cluster; if 172.18.0.0/16
-#     is taken (e.g. by the todo-app compose net), it lands elsewhere and we
-#     must follow — the pinned Gitea LB + floci gateway have to be on-subnet.
-# -----------------------------------------------------------------------------
 detect_network() {
   step "2b. Detecting kind network subnet"
   local subnet prefix
@@ -195,9 +151,6 @@ detect_network() {
   return 0
 }
 
-# -----------------------------------------------------------------------------
-# 3. Install MetalLB (all clusters, non-overlapping pools)
-# -----------------------------------------------------------------------------
 install_metallb() {
   step "3. Installing MetalLB on all clusters"
   local pools=("$MGMT_POOL" "$DEV_POOL" "$PROD_POOL")
@@ -231,9 +184,6 @@ EOF
   done
 }
 
-# -----------------------------------------------------------------------------
-# 4. Install ingress-nginx (all clusters)
-# -----------------------------------------------------------------------------
 install_ingress() {
   step "4. Installing ingress-nginx on all clusters"
   for c in "${CLUSTERS[@]}"; do
@@ -247,9 +197,6 @@ install_ingress() {
   done
 }
 
-# -----------------------------------------------------------------------------
-# 5. Install Gitea (management) + seed GitOps repos
-# -----------------------------------------------------------------------------
 install_gitea() {
   step "5. Installing Gitea on the management cluster"
   helm repo add gitea https://dl.gitea.com/charts >/dev/null 2>&1 || true
@@ -260,15 +207,12 @@ install_gitea() {
     -f bootstrap/gitea/values.yaml \
     --wait --timeout 600s
   kc "$MGMT_CLUSTER" apply -f bootstrap/gitea/ingress.yaml
-  # Pinned LB so the dev/prod Argo instances can clone Gitea cross-cluster
-  # (the pinned IP is rewritten to the live subnet when it differs from default).
   subst_net < bootstrap/gitea/git-lb.yaml | kc "$MGMT_CLUSTER" apply -f -
   seed_gitea
 }
 
 seed_gitea() {
   log "seeding Gitea org '${GITEA_ORG}' and GitOps repos"
-  # Port-forward the Gitea API/HTTP to localhost for setup.
   kc "$MGMT_CLUSTER" -n gitea port-forward svc/gitea-http 3000:3000 >/tmp/gitea-pf.log 2>&1 &
   local pf=$!
   trap 'kill '"$pf"' >/dev/null 2>&1 || true' RETURN
@@ -281,18 +225,14 @@ seed_gitea() {
     sleep 3
   done
 
-  # Org (ignore 'already exists').
   curl -sf -u "$auth" -X POST "${base}/api/v1/orgs" \
     -H 'Content-Type: application/json' \
     -d "{\"username\":\"${GITEA_ORG}\"}" >/dev/null 2>&1 || true
 
-  # Lab repos that live inside this repo (platform-config, gitops-apps).
   for repo in "${GITEA_REPOS[@]}"; do
     create_gitea_repo "$repo" "$auth" "$base"
     push_repo "$repo" "${REPO_ROOT}/${repo}"
   done
-  # The application repo (external git repo with its own Helm chart) — only when
-  # the app deployment is enabled.
   if [ "$DEPLOY_APP" = "true" ]; then
     if [ -d "$APP_REPO_PATH" ]; then
       create_gitea_repo "$APP_REPO_NAME" "$auth" "$base"
@@ -314,20 +254,16 @@ create_gitea_repo() {
     -d "{\"name\":\"${repo}\",\"private\":false,\"auto_init\":false}" >/dev/null 2>&1 || true
 }
 
-# push_repo <repo-name> <local-src-dir>  — snapshot a directory as a fresh repo.
 push_repo() {
   local repo="$1" src="$2"
   [ -d "$src" ] || { warn "missing source dir for repo '$repo'"; return; }
   log "pushing '$repo' to Gitea"
   local tmp; tmp="$(mktemp -d)"
   cp -r "$src/." "$tmp/"
-  # When the app deployment is disabled, don't ship the todo-app / dependency
-  # Applications, so the per-cluster Argo never deploys them.
   if [ "$repo" = "platform-config" ] && [ "$DEPLOY_APP" != "true" ]; then
     rm -f "$tmp"/envs/*/todo-app.yaml "$tmp"/envs/*/dependencies.yaml
     log "  (DEPLOY_APP=false: omitting todo-app + dependencies)"
   fi
-  # Rewrite the pinned Gitea LB IP / floci gateway to the live kind subnet.
   subst_net_tree "$tmp"
   (
     cd "$tmp"
@@ -341,7 +277,6 @@ push_repo() {
   rm -rf "$tmp"
 }
 
-# Mirror the application repo's tracked files (respecting its .gitignore) to Gitea.
 push_app_repo() {
   log "mirroring app repo '${APP_REPO_NAME}' (tracked files) to Gitea"
   local tmp; tmp="$(mktemp -d)"
@@ -359,9 +294,6 @@ push_app_repo() {
   rm -rf "$tmp"
 }
 
-# -----------------------------------------------------------------------------
-# 6. Install Argo CD in EACH workload cluster (one Argo per env)
-# -----------------------------------------------------------------------------
 install_argocd() {
   step "6. Installing Argo CD in the dev & prod clusters"
   for c in "${ARGO_CLUSTERS[@]}"; do
@@ -379,10 +311,6 @@ install_argocd() {
   done
 }
 
-# Connect this cluster's Argo CD to the local Gitea over the pinned cross-cluster
-# git URL (GITEA_GIT_URL). Argo then shows the repos as "Connected" and uses the
-# Gitea URL as the default source. The secrets are rendered from lib/common.sh at
-# install time (no secret values committed to Git).
 register_gitea_repos() {
   local c="$1" repo
   local repos=("${GITEA_REPOS[@]}")
@@ -407,9 +335,6 @@ EOF
   done
 }
 
-# -----------------------------------------------------------------------------
-# 7. Build the app image and load it into the dev & prod clusters
-# -----------------------------------------------------------------------------
 build_and_load_image() {
   step "7. Building & loading the todo-app image"
   if [ "$DEPLOY_APP" != "true" ]; then
@@ -425,7 +350,6 @@ build_and_load_image() {
     docker build -t "${APP_IMAGE}:${tag}" "$APP_REPO_PATH" >/dev/null \
       || { warn "image build failed for ${APP_IMAGE}:${tag}"; return; }
   done
-  # dev cluster runs :dev, prod cluster runs :prod (both loaded so either works).
   for c in "${ARGO_CLUSTERS[@]}"; do
     for tag in dev prod; do
       log "[$c] loading ${APP_IMAGE}:${tag}"
@@ -434,9 +358,6 @@ build_and_load_image() {
   done
 }
 
-# -----------------------------------------------------------------------------
-# 8. Bootstrap each cluster's root Application (app-of-apps)
-# -----------------------------------------------------------------------------
 bootstrap_root() {
   step "8. Bootstrapping per-cluster root Applications"
   for c in "${ARGO_CLUSTERS[@]}"; do
@@ -446,19 +367,13 @@ bootstrap_root() {
   log "Each Argo CD now reconciles its env from platform-config/envs/<env>."
 }
 
-# -----------------------------------------------------------------------------
-# floci (local AWS) — best-effort seeding of SSM parameters
-# -----------------------------------------------------------------------------
 seed_floci() {
   step "Seeding floci (SSM parameters + ECR registry)"
   if ! require_cmd aws; then warn "aws CLI not found; skipping floci seeding"; return; fi
   local ep="$FLOCI_HOST_ENDPOINT"
   if ! curl -sf "${ep}" >/dev/null 2>&1; then warn "floci not reachable at ${ep}; skipping seeding"; return; fi
-  # Use the local 'floci' profile created by setup_aws_profile.
   export AWS_PROFILE="$AWS_PROFILE_NAME"
 
-  # SSM params consumed by the todo-app's ExternalSecret (/gitops/<env>/todo-app/*).
-  # Values match the postgres/redis dependencies the platform deploys.
   for env in dev prod; do
     local pfx="/gitops/${env}/todo-app"
     aws --endpoint-url "$ep" ssm put-parameter --overwrite --type String \
@@ -470,14 +385,10 @@ seed_floci() {
     log "ssm: ${pfx}/{DB_USER,DB_PASSWORD,REDIS_PASSWORD}"
   done
 
-  # ECR repo (the lab's "docker images register using AWS ECR").
   aws --endpoint-url "$ep" ecr create-repository --repository-name "gitops/todo-app" \
     >/dev/null 2>&1 && log "ecr: gitops/todo-app" || true
 }
 
-# -----------------------------------------------------------------------------
-# DNS — dnsmasq + systemd-resolved (fallback: /etc/hosts), no manual edits
-# -----------------------------------------------------------------------------
 lb_ip() { kc "$1" -n ingress-nginx get svc ingress-nginx-controller \
   -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null; }
 
@@ -494,8 +405,6 @@ setup_dns() {
   PROD_IP="$(wait_lb_ip "$PROD_CLUSTER")" || die "prod ingress never got a LoadBalancer IP"
   log "ingress IPs  mgmt=$MGMT_IP  dev=$DEV_IP  prod=$PROD_IP"
 
-  # Host -> IP map. Gitea is on management; each env's Argo + apps live in that
-  # env's own cluster, so argo/grafana/todo-app.<env>.local point at <env>'s ingress.
   declare -A HOSTS=(
     [gitea.dev.local]="$MGMT_IP"
     [argo.dev.local]="$DEV_IP"
@@ -506,16 +415,11 @@ setup_dns() {
     [todo-app.prod.local]="$PROD_IP"
   )
 
-  # System-level split DNS via dnsmasq + systemd-resolved (so the whole host,
-  # CLIs, etc. resolve the lab domains)...
   if require_cmd dnsmasq && systemctl is-active --quiet systemd-resolved; then
     setup_dns_dnsmasq
   else
     warn "dnsmasq or systemd-resolved unavailable; relying on /etc/hosts only"
   fi
-  # ...AND /etc/hosts, because browsers with "Secure DNS"/DoH bypass the system
-  # resolver and would otherwise never reach dnsmasq. /etc/hosts is honored
-  # regardless, so the UIs work in the browser without disabling DoH.
   setup_dns_hosts
 }
 
@@ -529,7 +433,6 @@ setup_dns_dnsmasq() {
     for h in "${!HOSTS[@]}"; do echo "address=/${h}/${HOSTS[$h]}"; done
   } >"$DNS_CONFFILE"
 
-  # (re)start a dedicated dnsmasq instance.
   [ -f "$DNS_PIDFILE" ] && sudo kill "$(cat "$DNS_PIDFILE")" >/dev/null 2>&1 || true
   sudo dnsmasq --conf-file="$DNS_CONFFILE" --pid-file="$DNS_PIDFILE"
   log "dnsmasq listening on 127.0.0.1:${DNS_PORT}"
@@ -553,24 +456,15 @@ setup_dns_hosts() {
   done
 }
 
-# -----------------------------------------------------------------------------
-# 9b. One-time reconcile — wait until every Argo CD app is Synced & Healthy so
-#     the lab is ready to use the moment install.sh / `task install` returns.
-# -----------------------------------------------------------------------------
 reconcile() {
   step "9b. Reconciling Argo CD applications (one-time)"
   for c in "${ARGO_CLUSTERS[@]}"; do
-    # The root app must sync first — it's what creates the child Applications.
     nudge_until_healthy "$c" "root"
-    # Then wait for the whole app tree (root + children) to settle.
     nudge_until_healthy "$c"
   done
   log "All applications reconciled — the lab is ready to work."
 }
 
-# nudge_until_healthy <cluster> [app]
-# Hard-refresh the target app(s) (which triggers their automated sync) and poll
-# until everything is Synced & Healthy, or a timeout elapses (then warn + go on).
 nudge_until_healthy() {
   local c="$1" only="${2:-}"
   local label="${only:-all apps}"
@@ -606,9 +500,6 @@ nudge_until_healthy() {
   done
 }
 
-# -----------------------------------------------------------------------------
-# 10b. Print URLs / credentials
-# -----------------------------------------------------------------------------
 output() {
   step "Platform ready"
   local dev_pw prod_pw
@@ -645,25 +536,24 @@ output() {
 EOF
 }
 
-# -----------------------------------------------------------------------------
 main() {
   log "Starting GitOps Enterprise Lab install"
-  check_deps             # 0
-  install_tools          # 1
-  setup_aws_profile      # local AWS 'floci' profile in ~/.aws
-  setup_floci            # start floci (local AWS)
-  seed_floci             # SSM params + ECR repo
-  create_clusters        # 2  (management, dev, prod)
-  detect_network         # 2b (derive pools/Gitea IP/floci gw from kind subnet)
-  install_metallb        # 3
-  install_ingress        # 4
-  install_gitea          # 5  (+ seed platform-config, gitops-apps, app repo)
-  install_argocd         # 6  (one Argo per env: dev, prod)
-  build_and_load_image   # 7  (todo-app image -> kind)
-  bootstrap_root         # 8  (per-cluster app-of-apps)
-  setup_dns              # 9
-  reconcile              # 9b (one-time sync: wait until all apps are healthy)
-  output                 # 10
+  check_deps
+  install_tools
+  setup_aws_profile
+  setup_floci
+  seed_floci
+  create_clusters
+  detect_network
+  install_metallb
+  install_ingress
+  install_gitea
+  install_argocd
+  build_and_load_image
+  bootstrap_root
+  setup_dns
+  reconcile
+  output
 }
 
 main "$@"

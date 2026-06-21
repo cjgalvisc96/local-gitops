@@ -1,27 +1,13 @@
-# =============================================================================
-# mise (https://mise.jdx.dev) — single source of truth for the lab's CLI tools.
-#
-# install.sh bootstraps mise (cross-distro: Debian, Fedora, Arch, RedHat, macOS)
-# and runs `mise install` to materialise exactly these pinned versions, so every
-# machine gets the same toolchain. Run `mise install` yourself, or `task tools`.
-#
-# Keep the kubectl / argocd pins in sync with KUBECTL_VERSION / ARGOCD_VERSION in
-# lib/common.sh — those drive the kindest node image compatibility window and the
-# Argo CD install manifest URL respectively.
-# =============================================================================
 [tools]
-kubectl = "1.31.4"     # must stay within one minor of kindest/node (see common.sh)
+kubectl = "1.31.4"
 kind    = "0.24.0"
 helm    = "3.16.3"
 k9s     = "0.32.7"
-argocd  = "2.13.2"     # matches ARGOCD_VERSION in lib/common.sh
+argocd  = "2.13.2"
 kustomize = "5.4.3"
-awscli  = "2.22.0"     # for floci SSM/ECR seeding
-task    = "3.40.1"     # task runner (Taskfile.yml)
-# trivy publishes frequently and old patch tags get pruned; track latest so the
-# install never 404s on a missing release (only used by `task k8s:trivy`).
-trivy   = "latest"     # image/cluster vulnerability scanning (task k8s:trivy)
+awscli  = "2.22.0"
+task    = "3.40.1"
+trivy   = "latest"
 
 [settings]
-# Don't prompt; install.sh runs non-interactively.
 idiomatic_version_file_enable_tools = []

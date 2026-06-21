@@ -1,4 +1,3 @@
-# Namespaces, ConfigMap, RBAC, and the floci-backed ClusterSecretStore.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -18,10 +17,6 @@ spec:
   syncPolicy:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true]
-    # The ClusterSecretStore is validated by the External Secrets webhook, which
-    # may not be serving yet when this app first syncs (it's installed by the
-    # external-secrets app at sync-wave -1). Retry with backoff so the apply
-    # self-heals once the webhook endpoint is up instead of staying OutOfSync.
     retry:
       limit: 10
       backoff: { duration: 10s, factor: 2, maxDuration: 3m }

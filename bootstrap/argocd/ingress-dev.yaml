@@ -1,4 +1,3 @@
-# Argo CD UI for the dev cluster, exposed at argo.dev.local.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

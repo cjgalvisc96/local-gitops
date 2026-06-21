@@ -1,4 +1,3 @@
-# Loki — single-binary, filesystem storage. Logs backend for Grafana.
 apiVersion: v1
 kind: ConfigMap
 metadata:

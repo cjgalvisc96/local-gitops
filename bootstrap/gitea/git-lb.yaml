@@ -1,8 +1,3 @@
-# Cross-cluster git access to Gitea. Gitea lives on the management cluster, but
-# the dev/prod Argo CD instances must clone from it. A dedicated LoadBalancer
-# with a pinned MetalLB IP (in the management pool) gives a stable address
-# reachable from any cluster on the shared kind bridge — git clients connect
-# straight to the gitea-http service, so no ingress Host-routing is needed.
 apiVersion: v1
 kind: Service
 metadata:

@@ -1,6 +1,3 @@
-# Tempo — monolithic, local storage. Traces backend. Receives OTLP from the
-# OpenTelemetry Collector (which gets spans from instrumented apps, e.g. todo-app
-# when DEPLOY_APP=true). Stays empty until something emits traces.
 apiVersion: v1
 kind: ConfigMap
 metadata:

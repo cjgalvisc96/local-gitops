@@ -1,4 +1,3 @@
-# Isolated, clearly-labeled namespaces per the "isolate and clean namespaces" goal.
 apiVersion: v1
 kind: Namespace
 metadata:
