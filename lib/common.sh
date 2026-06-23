@@ -30,6 +30,10 @@ export APP_IMAGE="local/todo-app"
 
 export PROJECT_NAME="${PROJECT_NAME:-local-gitops}"
 
+export RUNNER_CONTAINER="gitea-runner"
+export RUNNER_IMAGE="gitea/act_runner:0.2.11"
+export RUNNER_NAME="lab-runner"
+
 export FLOCI_CONTAINER="floci"
 export FLOCI_IMAGE="floci/floci:latest"
 export FLOCI_HELPER_IMAGES="registry:2 postgres:16-alpine"

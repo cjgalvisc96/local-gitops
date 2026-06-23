@@ -47,6 +47,7 @@ nav:
   - Architecture: architecture.md
   - Guides:
       - GitOps Workflow: workflow.md
+      - CI/CD (Gitea Actions): cicd.md
       - Observability: observability.md
       - Networking & DNS: networking.md
       - Secrets: secrets.md

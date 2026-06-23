@@ -339,6 +339,34 @@ EOF
   done
 }
 
+setup_runner() {
+  step "Setting up Gitea Actions runner"
+  local pod token
+  pod="$(kc "$MGMT_CLUSTER" -n gitea get pod -l app.kubernetes.io/name=gitea \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [ -n "$pod" ] || { warn "gitea pod not found; skipping runner setup"; return; }
+  token="$(kc "$MGMT_CLUSTER" -n gitea exec "$pod" -c gitea -- \
+    gitea actions generate-runner-token 2>/dev/null | tr -d '\r\n')"
+  [ -n "$token" ] || { warn "could not generate runner registration token; skipping runner"; return; }
+
+  docker rm -f "$RUNNER_CONTAINER" >/dev/null 2>&1 || true
+  log "starting act_runner ($RUNNER_IMAGE) registered to http://${GITEA_GIT_IP}:3000"
+  docker run -d --name "$RUNNER_CONTAINER" \
+    --network host \
+    --restart unless-stopped \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "${REPO_ROOT}/bootstrap/gitea/runner-config.yaml:/config.yaml:ro" \
+    -e CONFIG_FILE=/config.yaml \
+    -e GITEA_INSTANCE_URL="http://${GITEA_GIT_IP}:3000" \
+    -e GITEA_RUNNER_REGISTRATION_TOKEN="$token" \
+    -e GITEA_RUNNER_NAME="$RUNNER_NAME" \
+    --label "com.docker.compose.project=${PROJECT_NAME}" \
+    --label "com.docker.compose.service=gitea-runner" \
+    "$RUNNER_IMAGE" >/dev/null \
+    && log "act_runner '$RUNNER_NAME' started (label: lab)" \
+    || warn "act_runner failed to start"
+}
+
 build_and_load_image() {
   step "7. Building & loading the todo-app image"
   if [ "$DEPLOY_APP" != "true" ]; then
@@ -553,6 +581,7 @@ main() {
   install_metallb
   install_ingress
   install_gitea
+  setup_runner
   install_argocd
   build_and_load_image
   bootstrap_root

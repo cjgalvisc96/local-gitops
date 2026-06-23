@@ -1,0 +1,24 @@
+log:
+  level: info
+
+runner:
+  capacity: 1
+  timeout: 1h
+  # One label, mapped to a docker job image. Workflows target it with
+  # `runs-on: lab`. The image carries docker/git/python; the lab tools
+  # (aws, kind, yq) are installed per-job by the setup-lab composite action.
+  labels:
+    - "lab:docker://catthehacker/ubuntu:act-22.04"
+
+cache:
+  enabled: false
+
+container:
+  # Host networking + the host docker socket make a job behave exactly like a
+  # shell on the host: it reaches floci at localhost:4566 / its registry, the
+  # MetalLB Gitea IP (routable from a Linux host), builds against the host
+  # daemon, and `kind load`s straight into the kind node containers.
+  network: host
+  docker_host: "-"
+  valid_volumes:
+    - "**"

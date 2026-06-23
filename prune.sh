@@ -41,6 +41,20 @@ prune_contexts() {
   done
 }
 
+prune_runner() {
+  require_cmd docker || return
+  step "Removing Gitea Actions runner"
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$RUNNER_CONTAINER"; then
+    docker rm -f "$RUNNER_CONTAINER" >/dev/null 2>&1 \
+      && log "removed runner container '$RUNNER_CONTAINER'" || true
+  else
+    log "no runner container present"
+  fi
+  if docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1; then
+    docker rmi "$RUNNER_IMAGE" >/dev/null 2>&1 && log "removed image $RUNNER_IMAGE" || true
+  fi
+}
+
 prune_floci() {
   require_cmd docker || return
   step "Stopping floci (local AWS emulator) + spawned helpers"
@@ -128,6 +142,7 @@ prune_tools() {
 main() {
   log "Pruning GitOps Enterprise Lab"
   prune_clusters
+  prune_runner
   prune_floci
   prune_dns
   prune_contexts

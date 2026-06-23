@@ -23,6 +23,8 @@ gitea:
       DISABLE_REGISTRATION: true
     webhook:
       ALLOWED_HOST_LIST: "*"
+    actions:
+      ENABLED: true
 
 persistence:
   enabled: false
