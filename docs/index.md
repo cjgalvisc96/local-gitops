@@ -11,6 +11,8 @@ no cloud account required.
 - **GitOps with Argo CD** — `dev` and `prod` each run their **own** Argo CD and
   reconcile from an in-cluster Gitea.
 - **Self-hosted Git** — Gitea on the management cluster.
+- **CI/CD with Gitea Actions** — a host runner builds images, pushes to floci
+  ECR, applies infra (Terraform), and deploys via Git (see [CI/CD](cicd.md)).
 - **DEV → PROD promotion** — base + per-env Kustomize overlays.
 - **Observability** — metrics, logs and traces via OpenTelemetry into
   Prometheus / Loki / Tempo, surfaced in Grafana.

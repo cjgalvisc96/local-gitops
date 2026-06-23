@@ -10,7 +10,7 @@
 ├── clusters/             kind cluster definitions (management, dev, prod)
 ├── bootstrap/            imperative install assets
 │   ├── argocd/           Argo CD params, RBAC, ingresses, root apps (dev/prod)
-│   ├── gitea/            Gitea values, ingress, pinned LoadBalancer
+│   ├── gitea/            Gitea values, ingress, pinned LoadBalancer, runner config
 │   ├── ingress-nginx/    ingress-nginx values
 │   └── dns/              local DNS wiring
 ├── platform-config/      GitOps control repo (app-of-apps)

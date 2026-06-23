@@ -49,3 +49,10 @@ separate Argo CDs, so you promote by editing the prod side of the repo.
     `sourceRepos` to "make something work" is not allowed — fix the manifest.
 
 The `promote` task/skill encodes these steps.
+
+!!! note "App image promotion is automated"
+    The hand steps above are for **platform/stack** changes you edit in this repo.
+    An onboarded app's *image* build and DEV→PROD promotion are automated by its
+    Gitea Actions pipelines (build → push → bump `values-dev.yaml`; manual
+    dispatch bumps `values-prod.yaml`) — see [CI/CD](cicd.md). Either way it stays
+    a Git change Argo CD reconciles.

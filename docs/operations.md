@@ -13,6 +13,11 @@ everything.
 | `task prune` | tear down clusters, floci, DNS and Docker artifacts |
 | `task prune:all` | the above and uninstall the mise-managed tools |
 
+With `DEPLOY_APP=true`, `install.sh` also starts the **Gitea Actions runner** and
+applies the app's floci **Terraform** stack at bootstrap; `prune` removes the
+runner. The app's own pipelines drive build/deploy/promote — see
+[CI/CD](cicd.md).
+
 ## Validation
 
 | Task | Does |
