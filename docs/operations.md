@@ -48,4 +48,8 @@ Always validate before pushing — a change that doesn't render isn't done.
 | `task docs:serve` | serve this site locally at `http://127.0.0.1:8080` (live reload) |
 | `task docs:build` | build the static site into `site/` |
 
-The docs are MkDocs (`mkdocs.yml` + `docs/`); MkDocs is pinned in `mise.toml`.
+The docs are [MkDocs](https://www.mkdocs.org/) with the
+[Material](https://squidfunk.github.io/mkdocs-material/) theme (`mkdocs.yml` +
+`docs/`). They run on demand through `uv` at pinned versions (the `MKDOCS` var in
+`Taskfile.yml`); `uv` itself is pinned in `mise.toml`, so `task tools` is all the
+setup you need.

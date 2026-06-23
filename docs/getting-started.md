@@ -10,8 +10,11 @@
   versions live in `mise.toml`; nothing floats on `latest` except Trivy.
 
 ```bash
-task tools     # mise install + reshim — kubectl, kind, helm, argocd, kustomize, awscli, trivy, mkdocs
+task tools     # mise install + reshim — kubectl, kind, helm, argocd, kustomize, awscli, trivy, uv
 ```
+
+The documentation toolchain (MkDocs + the Material theme) is run on demand via
+`uv` (`uvx`) at pinned versions — see [Operations](operations.md#documentation).
 
 ## Install
 

@@ -4,6 +4,7 @@ vars:
   CLUSTERS: management dev prod
   ARGO_CLUSTERS: dev prod
   ENV: '{{.ENV | default "dev"}}'
+  MKDOCS: uvx --with mkdocs-material==9.7.6 --from mkdocs==1.6.1 mkdocs
 
 tasks:
   default:
@@ -128,9 +129,9 @@ tasks:
   docs:serve:
     desc: Serve the project documentation locally (http://127.0.0.1:8080)
     cmds:
-      - mkdocs serve -a 127.0.0.1:8080
+      - '{{.MKDOCS}} serve -a 127.0.0.1:8080'
 
   docs:build:
     desc: Build the static documentation site into site/
     cmds:
-      - mkdocs build
+      - '{{.MKDOCS}} build'
