@@ -40,14 +40,25 @@ flowchart LR
 
 ## App pipelines (owned by the app repo)
 
-The `modular-monolithic-app` repo carries two workflows under `.gitea/workflows/`
+The `modular-monolithic-app` repo carries these workflows under `.gitea/workflows/`
 (its `.github/` workflows are for real AWS/GitHub and are left untouched):
 
 | Workflow | Trigger | Does |
 |----------|---------|------|
 | `ci.yml` | push / PR to `main` (code paths) | lint, types, dead code, architecture, then the coverage suite (≥97%) against a throwaway PostgreSQL. |
+| `tf-floci.yml` | push to `main` (`infra/terraform/local/**`) or manual | `terraform apply ENV=local` against floci — provisions the **ECR repo + SSM params** the rest depends on. State persisted in floci S3. Manual dispatch can `plan`/`apply`/`destroy`. |
 | `cd.yml` | push to `main` (image-affecting paths) | build prod image → push to floci ECR → `kind load` into **dev** → bump `values-dev.yaml` → commit `[skip ci]`. Argo CD syncs dev. |
 | `promote.yml` | manual `workflow_dispatch` (optional `tag`) | take a dev-proven tag → `kind load` into **prod** → bump `values-prod.yaml` → commit. Argo CD syncs prod. |
+
+!!! note "One Terraform stack, two triggers — order: Terraform → build/push → promote"
+    `install.sh` applies the local Terraform stack at bootstrap, so a clean
+    `prune` → `install.sh` comes up with the `gitops/todo-app` ECR repo and the
+    `/gitops/<env>/todo-app/*` SSM params already in place. The `tf-floci`
+    pipeline runs the **same** stack for ongoing infra changes — they share state
+    in floci S3, so neither re-creates what the other made. The dependency order
+    still holds: infra (Terraform) before image (`cd.yml`) before prod
+    (`promote.yml`), because the build pushes to that ECR and the app's
+    `ExternalSecret` reads those SSM params.
 
 This keeps the GitOps invariant intact: CI never `kubectl apply`s a workload —
 it only **commits a tag**, and each cluster's Argo CD reconciles from Git. The

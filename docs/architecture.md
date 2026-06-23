@@ -62,9 +62,10 @@ app is deployed.
 The **platform** owns generic primitives only: clusters, Argo CD, the External
 Secrets Operator + `aws-ssm` store, ingress, DNS, floci and Gitea. An **app**
 owns everything app-specific in its own repo — Helm chart, namespace (Argo
-`CreateNamespace`), RBAC, datastores, and a `floci-seed` the platform runs at
-bootstrap. Onboarding an app is its `Application` file(s) in `envs/<env>/` plus
-one `sourceRepos` line — no platform code carries an app's name.
+`CreateNamespace`), RBAC, datastores, and its own floci seeding (a local
+Terraform stack the platform applies at bootstrap and the `tf-floci` pipeline
+applies thereafter). Onboarding an app is its `Application` file(s) in
+`envs/<env>/` plus one `sourceRepos` line — no platform code carries an app's name.
 
 ## Bootstrap vs. GitOps layer
 

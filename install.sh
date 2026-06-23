@@ -122,6 +122,48 @@ setup_floci() {
   warn "floci did not become ready in time; SSM-backed secrets may stay Missing"
 }
 
+seed_floci() {
+  step "Seeding floci infra via Terraform (ECR + SSM)"
+  if [ "$DEPLOY_APP" != "true" ]; then
+    log "DEPLOY_APP=false; skipping floci infra seed"
+    return
+  fi
+  if [ ! -d "$APP_TF_LOCAL_DIR" ]; then
+    warn "app Terraform stack not found at $APP_TF_LOCAL_DIR; skipping seed"; return
+  fi
+  require_cmd terraform || { warn "terraform not on PATH; skipping seed (run the tf-floci pipeline)"; return; }
+  require_cmd aws       || { warn "aws not on PATH; skipping floci seed"; return; }
+
+  # Run on a temp copy so the user's working tree stays clean; share state with
+  # the tf-floci pipeline through floci's S3 (same bucket/key) so neither
+  # re-creates what the other already made.
+  local ep="$FLOCI_HOST_ENDPOINT" tmp
+  tmp="$(mktemp -d)"
+  cp -r "$APP_TF_LOCAL_DIR/." "$tmp/"
+  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
+    aws --endpoint-url "$ep" s3 mb "s3://${TF_STATE_BUCKET}" >/dev/null 2>&1 || true
+  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
+    aws --endpoint-url "$ep" s3 cp "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" "$tmp/terraform.tfstate" >/dev/null 2>&1 \
+    && log "restored prior Terraform state from floci S3" || log "no prior Terraform state (fresh floci)"
+
+  if AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
+       terraform -chdir="$tmp" init -input=false >/dev/null \
+     && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
+       terraform -chdir="$tmp" apply -input=false -auto-approve \
+         -var "floci_endpoint=${ep}" -var "repository_name=${ECR_REPO_NAME}"; then
+    log "floci infra applied (ECR ${ECR_REPO_NAME} + /gitops/{dev,prod}/todo-app SSM)"
+  else
+    warn "terraform apply against floci did not fully succeed (RDS/ElastiCache may be unsupported here);"
+    warn "ECR + SSM are usually still created — verify with the tf-floci pipeline if the app stays Missing"
+  fi
+  if [ -f "$tmp/terraform.tfstate" ]; then
+    AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
+      aws --endpoint-url "$ep" s3 cp "$tmp/terraform.tfstate" "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" >/dev/null 2>&1 \
+      && log "saved Terraform state to floci S3 (shared with the tf-floci pipeline)" || true
+  fi
+  rm -rf "$tmp"
+}
+
 create_clusters() {
   step "2. Creating kind clusters"
   for c in "${CLUSTERS[@]}"; do
@@ -399,29 +441,6 @@ bootstrap_root() {
   log "Each Argo CD now reconciles its env from platform-config/envs/<env>."
 }
 
-seed_floci() {
-  step "Seeding floci (per-app SSM parameters + ECR registry)"
-  if ! require_cmd aws; then warn "aws CLI not found; skipping floci seeding"; return; fi
-  local ep="$FLOCI_HOST_ENDPOINT"
-  if ! curl -sf "${ep}" >/dev/null 2>&1; then warn "floci not reachable at ${ep}; skipping seeding"; return; fi
-
-  # Apps own their floci state: each registered app declares it in its own
-  # repo at infra/k8s/gitops/floci-seed.sh. The platform just runs it. Keeps
-  # this script app-agnostic and scales to any number of apps.
-  if [ "$DEPLOY_APP" != "true" ]; then
-    log "DEPLOY_APP=false; no app floci state to seed"
-    return
-  fi
-  local seed="${APP_REPO_PATH}/infra/k8s/gitops/floci-seed.sh"
-  if [ -x "$seed" ]; then
-    log "seeding floci for '${APP_REPO_NAME}' via its floci-seed.sh"
-    AWS_ENDPOINT_URL="$ep" AWS_PROFILE="$AWS_PROFILE_NAME" AWS_REGION="$AWS_REGION" \
-      "$seed" || warn "floci-seed.sh failed for ${APP_REPO_NAME}"
-  else
-    warn "no floci-seed.sh at ${seed}; skipping app floci seeding"
-  fi
-}
-
 lb_ip() { kc "$1" -n ingress-nginx get svc ingress-nginx-controller \
   -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null; }
 
@@ -540,10 +559,11 @@ output() {
     -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
   prod_pw="$(kc "$PROD_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
     -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
-  local dev_app="" prod_app=""
+  local dev_app="" prod_app="" app_note=""
   if [ "$DEPLOY_APP" = "true" ]; then
     dev_app=$'\n    todo-app     http://todo-app.dev.local'
     prod_app=$'\n    todo-app     http://todo-app.prod.local'
+    app_note=$'\n------------------------------------------------------------------\n  todo-app: floci infra (ECR + SSM) was applied via Terraform at install.\n  Iterate through Gitea Actions (same Terraform stack + shared state):\n    - tf-floci (push infra/terraform/local, or manual)  infra changes\n    - cd       (push to main)                            build -> push -> DEV\n    - promote  (manual)                                  release to PROD'
   fi
   cat <<EOF
 
@@ -564,7 +584,7 @@ output() {
       -o jsonpath='{.data.password}' | base64 -d
     kubectl --context kind-prod -n argocd get secret argocd-initial-admin-secret \\
       -o jsonpath='{.data.password}' | base64 -d
-  Tip:  k9s --context kind-dev   |   k9s --context kind-prod
+  Tip:  k9s --context kind-dev   |   k9s --context kind-prod${app_note}
 ==================================================================
 EOF
 }

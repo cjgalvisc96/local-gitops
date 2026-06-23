@@ -27,7 +27,10 @@ task install:app    # same, plus deploy the external todo-app (DEPLOY_APP=true)
 
 1. Verifies dependencies (Docker, Git, curl).
 2. Installs the pinned tools (via mise).
-3. Sets up the AWS profile and starts floci (local AWS emulator); seeds SSM + ECR.
+3. Sets up the AWS profile, starts floci (local AWS emulator), and applies the
+   app's local Terraform stack against it — the **same** stack the `tf-floci`
+   pipeline uses, with state shared in floci S3 (see [CI/CD](cicd.md)). This
+   provisions the ECR repo + SSM parameters.
 4. Creates the three kind clusters.
 5. Detects the live kind bridge subnet and derives all addresses from it.
 6. Installs MetalLB and ingress-nginx.

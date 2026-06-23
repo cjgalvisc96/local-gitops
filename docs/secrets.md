@@ -18,8 +18,10 @@ ExternalSecret ──▶ ClusterSecretStore (aws-ssm) ──▶ floci (local AWS
 ## floci — local AWS
 
 [floci](https://github.com/floci-io/floci) emulates AWS locally. `install.sh`
-starts it as a Docker container, seeds SSM parameters and ECR repositories, and
-the External Secrets Operator pulls from it.
+starts it as a Docker container and applies the app's local Terraform stack to
+it — the same stack the `tf-floci` pipeline runs (shared state in floci S3, see
+[CI/CD](cicd.md)) — provisioning the SSM parameters and ECR repository the
+External Secrets Operator and image pipelines consume.
 
 - Pods reach floci's host-published port through the kind bridge gateway
   (`<prefix>.0.1:4566`); the host seeds via `localhost:4566`.

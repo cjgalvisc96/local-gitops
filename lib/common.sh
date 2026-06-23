@@ -28,6 +28,14 @@ export APP_REPO_NAME="modular-monolithic-app"
 export APP_REPO_PATH="${APP_REPO_PATH:-$HOME/Documents/Personal/modular-monolithic-app}"
 export APP_IMAGE="local/todo-app"
 
+# floci infra (ECR + SSM) is provisioned by the app's local Terraform stack —
+# the SAME stack the tf-floci Gitea pipeline applies. install.sh applies it at
+# bootstrap; both share state in floci's S3 (these must match the workflow).
+export APP_TF_LOCAL_DIR="${APP_REPO_PATH}/infra/terraform/local"
+export ECR_REPO_NAME="gitops/todo-app"
+export TF_STATE_BUCKET="todo-tfstate-local"
+export TF_STATE_KEY="local/terraform.tfstate"
+
 export PROJECT_NAME="${PROJECT_NAME:-local-gitops}"
 
 export RUNNER_CONTAINER="gitea-runner"
