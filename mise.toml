@@ -8,6 +8,7 @@ kustomize = "5.4.3"
 awscli  = "2.22.0"
 task    = "3.40.1"
 trivy   = "latest"
+"pipx:mkdocs" = "1.6.1"
 
 [settings]
 idiomatic_version_file_enable_tools = []

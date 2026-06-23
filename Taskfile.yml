@@ -124,3 +124,13 @@ tasks:
           - argo.prod.local
           - grafana.prod.local
         cmd: 'printf "%-22s -> " "{{.ITEM}}"; curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://{{.ITEM}}" || echo "unreachable"'
+
+  docs:serve:
+    desc: Serve the project documentation locally (http://127.0.0.1:8080)
+    cmds:
+      - mkdocs serve -a 127.0.0.1:8080
+
+  docs:build:
+    desc: Build the static documentation site into site/
+    cmds:
+      - mkdocs build

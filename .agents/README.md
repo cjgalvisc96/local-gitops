@@ -33,7 +33,8 @@ delegates; **architect** designs, **developer** implements, **tester** verifies,
   omitted from the push.
 - **Tooling.** The CLI toolchain is pinned in `mise.toml` and installed globally
   by `install.sh`; common workflows run through `Taskfile.yml` (`task install`,
-  `task validate`, `task k8s:status`, `task k8s:trivy`, …).
+  `task validate`, `task k8s:status`, `task k8s:trivy`, …). Full project
+  documentation lives in MkDocs (`task docs:serve`).
 
 **Shared invariant for every role:** the clusters are downstream of Git.
 Nothing is changed with imperative `kubectl apply`/`helm` on dev/prod — you change

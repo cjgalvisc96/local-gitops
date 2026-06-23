@@ -1,0 +1,22 @@
+site_name: GitOps Enterprise Lab
+site_description: A fully local, reproducible multi-cluster GitOps platform
+docs_dir: docs
+theme:
+  name: readthedocs
+  highlightjs: true
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - tables
+  - fenced_code
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Architecture: architecture.md
+  - Repository layout: repository.md
+  - GitOps workflow: workflow.md
+  - Observability: observability.md
+  - Networking & DNS: networking.md
+  - Secrets: secrets.md
+  - Operations: operations.md
