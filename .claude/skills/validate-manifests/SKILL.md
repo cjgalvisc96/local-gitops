@@ -15,8 +15,7 @@ Run the full static-validation sweep and report a concise pass/fail per area.
    for d in gitops-apps/platform/overlays/dev \
             gitops-apps/platform/overlays/prod \
             gitops-apps/observability/overlays/dev \
-            gitops-apps/observability/overlays/prod \
-            gitops-apps/dependencies/base; do
+            gitops-apps/observability/overlays/prod; do
      kustomize build "$d" >/dev/null && echo "OK  $d" || echo "FAIL $d"
    done
    ```

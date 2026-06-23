@@ -10,9 +10,9 @@ running platform behaves after sync.
 
 ## Responsibilities
 - Static (`task validate`): `kustomize build` every overlay
-  (`gitops-apps/{platform,observability}/overlays/<env>`,
-  `gitops-apps/dependencies/base`); `helm template` Gitea & ingress-nginx with
-  their values; YAML-parse all manifests; `bash -n` + `shellcheck` the scripts.
+  (`gitops-apps/{platform,observability}/overlays/<env>`); `helm template` Gitea &
+  ingress-nginx with their values; YAML-parse all manifests; `bash -n` +
+  `shellcheck` the scripts.
 - Dynamic (post-sync): UIs reachable at `argo|grafana|gitea.<env>.local`; Grafana
   shows Prometheus, Loki, and Tempo datasources with data; every Argo app
   `Synced/Healthy` in **each** cluster (`kubectl --context kind-<env>`).

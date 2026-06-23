@@ -261,8 +261,12 @@ push_repo() {
   local tmp; tmp="$(mktemp -d)"
   cp -r "$src/." "$tmp/"
   if [ "$repo" = "platform-config" ] && [ "$DEPLOY_APP" != "true" ]; then
-    rm -f "$tmp"/envs/*/todo-app.yaml "$tmp"/envs/*/dependencies.yaml
-    log "  (DEPLOY_APP=false: omitting todo-app + dependencies)"
+    # Keep only the core platform Applications; drop every app registration
+    # (any other manifest in envs/*/). Keeps the platform app-agnostic.
+    find "$tmp"/envs -type f -name '*.yaml' \
+      ! -name 'project.yaml' ! -name 'platform.yaml' \
+      ! -name 'observability.yaml' ! -name 'external-secrets.yaml' -delete
+    log "  (DEPLOY_APP=false: keeping only core platform apps)"
   fi
   subst_net_tree "$tmp"
   (
@@ -368,25 +372,26 @@ bootstrap_root() {
 }
 
 seed_floci() {
-  step "Seeding floci (SSM parameters + ECR registry)"
+  step "Seeding floci (per-app SSM parameters + ECR registry)"
   if ! require_cmd aws; then warn "aws CLI not found; skipping floci seeding"; return; fi
   local ep="$FLOCI_HOST_ENDPOINT"
   if ! curl -sf "${ep}" >/dev/null 2>&1; then warn "floci not reachable at ${ep}; skipping seeding"; return; fi
-  export AWS_PROFILE="$AWS_PROFILE_NAME"
 
-  for env in dev prod; do
-    local pfx="/gitops/${env}/todo-app"
-    aws --endpoint-url "$ep" ssm put-parameter --overwrite --type String \
-      --name "${pfx}/DB_USER" --value "todo" >/dev/null 2>&1 || true
-    aws --endpoint-url "$ep" ssm put-parameter --overwrite --type SecureString \
-      --name "${pfx}/DB_PASSWORD" --value "todo" >/dev/null 2>&1 || true
-    aws --endpoint-url "$ep" ssm put-parameter --overwrite --type SecureString \
-      --name "${pfx}/REDIS_PASSWORD" --value "redispass" >/dev/null 2>&1 || true
-    log "ssm: ${pfx}/{DB_USER,DB_PASSWORD,REDIS_PASSWORD}"
-  done
-
-  aws --endpoint-url "$ep" ecr create-repository --repository-name "gitops/todo-app" \
-    >/dev/null 2>&1 && log "ecr: gitops/todo-app" || true
+  # Apps own their floci state: each registered app declares it in its own
+  # repo at infra/k8s/gitops/floci-seed.sh. The platform just runs it. Keeps
+  # this script app-agnostic and scales to any number of apps.
+  if [ "$DEPLOY_APP" != "true" ]; then
+    log "DEPLOY_APP=false; no app floci state to seed"
+    return
+  fi
+  local seed="${APP_REPO_PATH}/infra/k8s/gitops/floci-seed.sh"
+  if [ -x "$seed" ]; then
+    log "seeding floci for '${APP_REPO_NAME}' via its floci-seed.sh"
+    AWS_ENDPOINT_URL="$ep" AWS_PROFILE="$AWS_PROFILE_NAME" AWS_REGION="$AWS_REGION" \
+      "$seed" || warn "floci-seed.sh failed for ${APP_REPO_NAME}"
+  else
+    warn "no floci-seed.sh at ${seed}; skipping app floci seeding"
+  fi
 }
 
 lb_ip() { kc "$1" -n ingress-nginx get svc ingress-nginx-controller \

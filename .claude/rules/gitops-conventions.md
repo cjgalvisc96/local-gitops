@@ -16,6 +16,13 @@ Apply these whenever working in this repo.
 - Each workload cluster (dev, prod) runs its **own** Argo CD; its `root` app
   recurses `platform-config/envs/<env>` (app-of-apps). No ApplicationSets — a new
   stack is a new `Application` file in that dir. Management runs only Gitea.
+- **Platform vs. app boundary.** The platform owns only generic primitives
+  (clusters, Argo CD, ESO + the `aws-ssm` store, ingress, DNS, floci, Gitea). An
+  app owns everything app-specific *in its own repo*: Helm chart, namespace
+  (Argo `CreateNamespace`), RBAC, datastores, and an `infra/k8s/gitops/floci-seed.sh`
+  the platform runs during bootstrap. Onboarding an app is its `Application`
+  file(s) in `envs/<env>/` + one `sourceRepos` line — no platform code carries an
+  app's name. Keep it that way when adding apps.
 - Tool versions are pinned in `mise.toml` (installed globally by `install.sh`);
   charts/images are pinned in `lib/common.sh` / manifests. One source of truth,
   no floating `latest` in the GitOps layer. Drive workflows via `Taskfile.yml`.

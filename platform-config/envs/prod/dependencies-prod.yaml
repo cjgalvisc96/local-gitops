@@ -1,0 +1,21 @@
+# Argo CD Application — local datastores (Postgres + Redis) for todo-app on prod.
+# See dependencies-dev.yaml; drop a copy into platform-config/envs/prod/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: todo-app-deps-prod
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: prod
+  source:
+    repoURL: http://172.18.255.209:3000/gitops/modular-monolithic-app.git
+    targetRevision: HEAD
+    path: infra/k8s/dependencies/base
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: todo-app
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]

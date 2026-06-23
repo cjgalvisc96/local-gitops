@@ -15,14 +15,20 @@ project.yaml           AppProject <env> (scopes sourceRepos to the Gitea repos)
 platform.yaml          → gitops-apps/platform/overlays/<env>
 observability.yaml     → gitops-apps/observability/overlays/<env>
 external-secrets.yaml  External Secrets Operator (Helm chart)
-dependencies.yaml      → gitops-apps/dependencies/base   (only with DEPLOY_APP=true)
-todo-app.yaml          the external app's Helm chart     (only with DEPLOY_APP=true)
 ```
 
+The four files above are the **core platform** (always present). Everything else
+in `envs/<env>/` is an **app registration**, present only with `DEPLOY_APP=true`
+and owned by the app, not the platform — e.g. `todo-app.yaml` (the app's Helm
+chart) and `dependencies-<env>.yaml` (the app's own datastores), both sourced
+from the app's own repo. Apps bring their own namespace, RBAC, datastores and
+floci/SSM seed; the platform stays app-agnostic.
+
 The `root` app sets `directory.recurse: true`, so dropping a new `Application`
-into `envs/<env>/` is enough — no generators or ApplicationSets. The manifests
-these Applications point at live in the `gitops-apps` repo; Argo clones both
-repos from Gitea over its pinned LoadBalancer IP.
+into `envs/<env>/` (plus one `sourceRepos` line in `project.yaml`) is enough —
+no generators or ApplicationSets. Platform manifests live in `gitops-apps`; app
+manifests live in the app's repo. Argo clones each from Gitea over its pinned
+LoadBalancer IP.
 
 Promote by proving a change in `envs/dev` (or its `gitops-apps` overlay) first,
 then mirroring it into the `prod` counterpart.

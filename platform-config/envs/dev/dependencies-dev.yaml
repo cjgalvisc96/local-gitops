@@ -1,0 +1,25 @@
+# Argo CD Application — local datastores (Postgres + Redis) for todo-app on dev.
+#
+# Sourced from THIS repo (infra/k8s/dependencies/base), not the platform's
+# gitops-apps repo: the app owns its own datastores. sync-wave 1 places these
+# before the app (wave 2) so they are healthy before the chart's pre-install
+# db-init (Atlas) hook runs. Drop a copy into platform-config/envs/dev/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: todo-app-deps-dev
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: dev
+  source:
+    repoURL: http://172.18.255.209:3000/gitops/modular-monolithic-app.git
+    targetRevision: HEAD
+    path: infra/k8s/dependencies/base
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: todo-app
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]

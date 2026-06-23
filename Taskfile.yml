@@ -55,7 +55,6 @@ tasks:
         gitops-apps/platform/overlays/prod
         gitops-apps/observability/overlays/dev
         gitops-apps/observability/overlays/prod
-        gitops-apps/dependencies/base
 
   validate:scripts:
     desc: bash -n + shellcheck the shell scripts
