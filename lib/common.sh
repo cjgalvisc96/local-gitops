@@ -8,7 +8,10 @@ export CLUSTERS=("$MGMT_CLUSTER")
 export NODE_IMAGE="kindest/node:v1.31.4"
 export METALLB_VERSION="v0.14.8"
 export INGRESS_NGINX_VERSION="4.11.3"
-export GITEA_CHART_VERSION="10.6.0"
+# Gitea chart 12.x ships Gitea >= 1.24, which has the Actions workflow-dispatch
+# UI button + API — needed to launch the manual PROD promote (task gitea:promote).
+# (10.x shipped 1.22, which had neither.)
+export GITEA_CHART_VERSION="12.4.0"
 
 export DNS_PORT="5300"
 export DNS_PIDFILE="/tmp/gitops-dnsmasq.pid"
