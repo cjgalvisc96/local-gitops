@@ -18,7 +18,15 @@ container:
   # shell on the host: it reaches floci at localhost:4566 / its registry, the
   # MetalLB Gitea IP (routable from a Linux host), builds against the host
   # daemon, and `kind load`s straight into the kind node containers.
+  #
+  # `docker_host: "-"` lets act_runner auto-find the host daemon to spawn job
+  # containers, but it does NOT mount the socket inside those jobs — so steps
+  # that shell out to `docker` (the CD build/push) fail with
+  # "/var/run/docker.sock: no such file or directory". act_runner 0.2.11 has no
+  # "automount", so we bind-mount the socket into every job via `options`. That
+  # gives jobs a working `docker` CLI (and `kind load` reaches the kind nodes).
   network: host
   docker_host: "-"
+  options: "-v /var/run/docker.sock:/var/run/docker.sock"
   valid_volumes:
     - "**"
