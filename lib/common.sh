@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
+# KIND runs ONLY the management cluster — it hosts Gitea (source of truth) + the
+# Actions runner. There are no kind dev/prod clusters anymore: Argo CD, the app
+# AND observability all live on the app's floci-EKS dev/prod clusters.
 export MGMT_CLUSTER="management"
-export DEV_CLUSTER="dev"
-export PROD_CLUSTER="prod"
-export CLUSTERS=("$MGMT_CLUSTER" "$DEV_CLUSTER" "$PROD_CLUSTER")
+export CLUSTERS=("$MGMT_CLUSTER")
 
 export NODE_IMAGE="kindest/node:v1.31.4"
-export ARGOCD_VERSION="v2.13.2"
 export METALLB_VERSION="v0.14.8"
 export INGRESS_NGINX_VERSION="4.11.3"
 export GITEA_CHART_VERSION="10.6.0"
@@ -15,35 +15,27 @@ export DNS_PIDFILE="/tmp/gitops-dnsmasq.pid"
 export DNS_CONFFILE="/tmp/gitops-dnsmasq.conf"
 export RESOLVED_DROPIN="/etc/systemd/resolved.conf.d/gitops-lab.conf"
 
-export ARGO_CLUSTERS=("$DEV_CLUSTER" "$PROD_CLUSTER")
 
 # Uniform lab credentials. ONE password for everything; the user is 'admin'
 # everywhere except Gitea, which uses 'adminlocal' ('admin' is a reserved
 # username in Gitea, used for its /admin route). The Grafana admin password is
 # set separately in gitops-apps/observability/base/grafana.yaml — keep it in sync.
+# (The in-EKS Argo CD admin password is the cluster's argocd-initial-admin-secret
+# — fetch it with `task argo:password ENV=<env>`.)
 export LAB_PASSWORD="adminlocal1"
 export GITEA_ADMIN_USER="adminlocal"
 export GITEA_ADMIN_PASSWORD="$LAB_PASSWORD"
 export GITEA_ORG="gitops"
 
-# Argo CD admin login (set on argocd-secret at install): the Argo default 'admin'.
-export ARGO_ADMIN_USER="admin"
-export ARGO_ADMIN_PASSWORD="$LAB_PASSWORD"
+# Only gitops-apps is seeded into Gitea now (the observability stack the in-EKS
+# Argo syncs). The old platform-config app-of-apps is gone with the kind Argo.
+export GITEA_REPOS=("gitops-apps")
 
-export GITEA_REPOS=("platform-config" "gitops-apps")
-
-export DEPLOY_APP="${DEPLOY_APP:-false}"
-export APP_REPO_NAME="modular-monolithic-app"
-export APP_REPO_PATH="${APP_REPO_PATH:-$HOME/Documents/Personal/modular-monolithic-app}"
+# This platform is app-agnostic: it never deploys the todo-app. The app owns its
+# whole lifecycle — its Gitea pipeline provisions its floci cloud (Terragrunt),
+# bootstraps Argo CD INSIDE its floci-EKS clusters, and deploys there. The
+# platform only provides Gitea, observability and the kind management plane.
 export APP_IMAGE="local/todo-app"
-
-# floci infra (ECR + SSM) is provisioned by the app's local Terraform stack —
-# the SAME stack the tf-floci Gitea pipeline applies. install.sh applies it at
-# bootstrap; both share state in floci's S3 (these must match the workflow).
-export APP_TF_LOCAL_DIR="${APP_REPO_PATH}/infra/terraform/local"
-export ECR_REPO_NAME="gitops/todo-app"
-export TF_STATE_BUCKET="todo-tfstate-local"
-export TF_STATE_KEY="local/terraform.tfstate"
 
 export PROJECT_NAME="${PROJECT_NAME:-local-gitops}"
 
@@ -65,9 +57,13 @@ export NET_PREFIX="$DEFAULT_NET_PREFIX"
 apply_net_prefix() {
   NET_PREFIX="$1"
   export NET_PREFIX
+  # KIND (management) only needs a small pool for Gitea's LoadBalancer.
   export MGMT_POOL="${NET_PREFIX}.255.200-${NET_PREFIX}.255.209"
-  export DEV_POOL="${NET_PREFIX}.255.210-${NET_PREFIX}.255.219"
-  export PROD_POOL="${NET_PREFIX}.255.220-${NET_PREFIX}.255.229"
+  # The app's floci-EKS clusters advertise their OWN ingress IPs via an in-cluster
+  # MetalLB (the app Taskfile's eks:bootstrap-net pins the same IPs): dev = .230,
+  # prod = .240 — chosen clear of the kind pool above.
+  export EKS_DEV_IP="${NET_PREFIX}.255.230"
+  export EKS_PROD_IP="${NET_PREFIX}.255.240"
   export GITEA_GIT_IP="${NET_PREFIX}.255.209"
   export GITEA_GIT_URL="http://${GITEA_GIT_IP}:3000/${GITEA_ORG}"
   export FLOCI_GW="${NET_PREFIX}.0.1"

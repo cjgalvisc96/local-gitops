@@ -1,1 +1,11 @@
 site/
+
+# Rendered runner config (host path substituted at install)
+bootstrap/gitea/runner-config.rendered.yaml
+
+# Terraform/Terragrunt lab infra
+infra/terraform/.lab-state/
+**/.terraform/
+**/.terragrunt-cache/
+*.tfstate
+*.tfstate.*

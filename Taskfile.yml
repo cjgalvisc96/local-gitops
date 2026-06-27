@@ -1,10 +1,16 @@
 version: '3'
 
 vars:
-  CLUSTERS: management dev prod
-  ARGO_CLUSTERS: dev prod
+  # KIND = management only (Gitea). Argo CD + app + observability run on EKS.
+  CLUSTERS: management
   ENV: '{{.ENV | default "dev"}}'
   MKDOCS: uvx --with mkdocs-material==9.7.6 --from mkdocs==1.6.1 mkdocs
+  # Gitea coordinates (match lib/common.sh) — the in-cluster Git LB the EKS Argo
+  # pulls gitops-apps (observability) from.
+  GITEA_INCLUSTER_URL: '{{.GITEA_INCLUSTER_URL | default "http://172.18.255.209:3000"}}'
+  GITEA_ORG: '{{.GITEA_ORG | default "gitops"}}'
+  GITEA_ADMIN_USER: '{{.GITEA_ADMIN_USER | default "adminlocal"}}'
+  GITEA_ADMIN_PASSWORD: '{{.GITEA_ADMIN_PASSWORD | default "adminlocal1"}}'
 
 tasks:
   default:
@@ -19,27 +25,42 @@ tasks:
       - mise install
       - mise reshim
 
+  # Build the lab in two layers:
+  #   INFRA (Terraform/Terragrunt): the floci container + the kind management
+  #     cluster + the Gitea Actions runner container.
+  #   KUBERNETES (declarative helm/kubectl, ./install.sh): MetalLB, ingress-nginx,
+  #     Gitea, its ingress/LB + the gitops-apps seed, DNS.
+  # The runner needs a token from the running Gitea, so it is created on a SECOND
+  # Terragrunt apply after the Kubernetes layer is up.
   install:
-    desc: Build the full lab (clusters, Gitea, per-cluster Argo CD, platform)
+    desc: 'Build the full lab — Terraform infra (floci + kind) + the Kubernetes layer (helm/kubectl) + the Gitea runner'
     cmds:
+      # 1) INFRA (Terragrunt): floci container + kind management cluster.
+      - bash -c 'cd "$(git rev-parse --show-toplevel)/infra/terragrunt/lab" && terragrunt apply -auto-approve -input=false'
+      - kind export kubeconfig --name management
+      # 2) KUBERNETES layer (declarative helm/kubectl) + Gitea seed.
       - ./install.sh
-
-  install:app:
-    desc: Build the lab AND wire Argo to deploy the app (empty repo + Argo repo URL + Applications; DEPLOY_APP=true). Push content with the app's `task gitea:ship`.
-    cmds:
-      - DEPLOY_APP=true ./install.sh
+      # 3) RUNNER (Terraform): fetch a Gitea token, then a second apply creates it.
+      - |
+        set -e
+        root="$(git rev-parse --show-toplevel)"
+        pod=$(kubectl --context kind-management -n gitea get pod -l app.kubernetes.io/name=gitea -o jsonpath='{.items[0].metadata.name}')
+        token=$(kubectl --context kind-management -n gitea exec "$pod" -c gitea -- gitea actions generate-runner-token | tr -d '\r\n')
+        ( cd "$root/infra/terragrunt/lab" && TF_VAR_runner_token="$token" terragrunt apply -auto-approve -input=false )
+        echo "✅ lab ready — Gitea Actions runner provisioned"
 
   gitea:ship:
-    desc: Re-push the platform GitOps repos (platform-config, gitops-apps) to Gitea so Argo reconciles your changes — no reinstall. Needs the lab running.
+    desc: Re-push gitops-apps (observability) to Gitea so the in-EKS Argo reconciles your changes — no reinstall. Needs the lab running.
     cmds:
-      # DEPLOY_APP=true pushes platform-config verbatim (keeps the app's Argo
-      # Applications); SYNC_ONLY skips the cluster/Argo rebuild.
-      - SYNC_ONLY=true DEPLOY_APP=true ./install.sh
+      - SYNC_ONLY=true ./install.sh
 
+  # Tear down both layers: Terragrunt destroys the runner + kind cluster + floci;
+  # prune.sh mops up host state (DNS block, kube contexts, floci helper containers).
   prune:
-    desc: Tear down clusters, floci, DNS and Docker artifacts
+    desc: 'Tear down the lab — Terragrunt destroy (runner + kind + floci) then host cleanup'
     cmds:
-      - ./prune.sh
+      - cmd: bash -c 'cd "$(git rev-parse --show-toplevel)/infra/terragrunt/lab" && terragrunt destroy -auto-approve -input=false || true'
+      - cmd: ./prune.sh
 
   prune:all:
     desc: Tear down everything AND uninstall the mise-managed CLI tools
@@ -70,57 +91,158 @@ tasks:
       - bash -n install.sh prune.sh lib/common.sh
       - 'command -v shellcheck >/dev/null && shellcheck -x install.sh prune.sh lib/common.sh || echo "(shellcheck not installed; skipped)"'
 
+  # Argo CD now lives on the floci-EKS clusters. These inspection tasks read the
+  # EKS kubeconfig the app writes (task eks:kubeconfig ENV=<env>).
   k8s:status:
-    desc: Show clusters and Argo CD application health
+    desc: Show the management cluster + the EKS Argo CD application health (ENV=dev)
     cmds:
-      - 'echo "=== kind clusters ===" && kind get clusters'
-      - for: { var: ARGO_CLUSTERS }
-        cmd: 'echo "=== {{.ITEM}} apps ===" && kubectl --context kind-{{.ITEM}} -n argocd get applications.argoproj.io'
+      - 'echo "=== kind clusters (management = Gitea) ===" && kind get clusters'
+      - |
+        KCFG="/tmp/floci-eks-{{.ENV}}.kubeconfig"
+        [ -f "$KCFG" ] || { echo "no EKS kubeconfig — run (from the app) task eks:kubeconfig ENV={{.ENV}}"; exit 0; }
+        echo "=== floci-eks-{{.ENV}} apps ==="
+        KUBECONFIG="$KCFG" kubectl -n argocd get applications.argoproj.io
 
   k8s:pods:
-    desc: List pods across all clusters (ENV=dev to scope to one cluster)
-    cmds:
-      - for: { var: CLUSTERS }
-        cmd: 'echo "=== {{.ITEM}} ===" && kubectl --context kind-{{.ITEM}} get pods -A'
-
-  k8s:apps:
-    desc: Show Argo CD applications for ENV (default dev)
-    cmds:
-      - kubectl --context kind-{{.ENV}} -n argocd get applications.argoproj.io
-
-  k8s:sync:
-    desc: Hard-refresh + sync every Argo app in ENV (default dev)
+    desc: List pods on the floci-EKS cluster (ENV=dev)
     cmds:
       - |
-        for app in $(kubectl --context kind-{{.ENV}} -n argocd get applications.argoproj.io -o name); do
-          kubectl --context kind-{{.ENV}} -n argocd annotate "$app" argocd.argoproj.io/refresh=hard --overwrite >/dev/null
-          kubectl --context kind-{{.ENV}} -n argocd patch "$app" --type merge -p '{"operation":{"sync":{}}}' >/dev/null
+        KCFG="/tmp/floci-eks-{{.ENV}}.kubeconfig"
+        [ -f "$KCFG" ] || { echo "no EKS kubeconfig — run (from the app) task eks:kubeconfig ENV={{.ENV}}"; exit 1; }
+        KUBECONFIG="$KCFG" kubectl get pods -A
+
+  k8s:apps:
+    desc: Show Argo CD applications on the floci-EKS cluster (ENV=dev)
+    cmds:
+      - KUBECONFIG="/tmp/floci-eks-{{.ENV}}.kubeconfig" kubectl -n argocd get applications.argoproj.io
+
+  k8s:sync:
+    desc: Hard-refresh + sync every Argo app on the floci-EKS cluster (ENV=dev)
+    cmds:
+      - |
+        export KUBECONFIG="/tmp/floci-eks-{{.ENV}}.kubeconfig"
+        for app in $(kubectl -n argocd get applications.argoproj.io -o name); do
+          kubectl -n argocd annotate "$app" argocd.argoproj.io/refresh=hard --overwrite >/dev/null
+          kubectl -n argocd patch "$app" --type merge -p '{"operation":{"sync":{}}}' >/dev/null
           echo "synced $app"
         done
 
   k8s:trivy:
-    desc: 'Scan a cluster (ENV=dev) or an image (IMG=local/todo-app:dev) with Trivy'
+    desc: 'Scan the floci-EKS cluster (ENV=dev) or an image (IMG=local/todo-app:dev) with Trivy'
     cmds:
       - |
         if [ -n "{{.IMG}}" ]; then
           trivy image "{{.IMG}}"
         else
-          echo "Scanning kind-{{.ENV}} (pass IMG=<image> to scan a single image instead)"
-          trivy k8s --context kind-{{.ENV}} --report summary --scanners misconfig,vuln
+          echo "Scanning floci-eks-{{.ENV}} (pass IMG=<image> to scan a single image instead)"
+          KUBECONFIG="/tmp/floci-eks-{{.ENV}}.kubeconfig" trivy k8s --report summary --scanners misconfig,vuln
         fi
 
   argo:password:
-    # Fixed lab creds (set on argocd-secret at install) — keep in sync with
-    # LAB_PASSWORD in lib/common.sh.
-    desc: 'Print the Argo CD admin login for each workload cluster (admin / adminlocal1)'
+    desc: 'Print the in-EKS Argo CD admin login (ENV=dev). User: admin.'
     cmds:
-      - for: { var: ARGO_CLUSTERS }
-        cmd: 'echo "kind-{{.ITEM}}: admin / adminlocal1"'
+      - |
+        KCFG="/tmp/floci-eks-{{.ENV}}.kubeconfig"
+        [ -f "$KCFG" ] || { echo "no EKS kubeconfig — run (from the app) task eks:kubeconfig ENV={{.ENV}}"; exit 1; }
+        pw=$(KUBECONFIG="$KCFG" kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)
+        echo "floci-eks-{{.ENV}}: admin / ${pw:-<rotated — check argocd-initial-admin-secret>}   http://argo.{{.ENV}}.local"
 
   argo:repos:
-    desc: Show the Gitea repositories Argo CD is linked to (ENV=dev)
+    desc: Show the Gitea repositories the in-EKS Argo CD is linked to (ENV=dev)
     cmds:
-      - kubectl --context kind-{{.ENV}} -n argocd get secret -l argocd.argoproj.io/secret-type=repository
+      - KUBECONFIG="/tmp/floci-eks-{{.ENV}}.kubeconfig" kubectl -n argocd get secret -l argocd.argoproj.io/secret-type=repository
+
+  # The GitOps control plane on the app's floci-EKS clusters is the PLATFORM's
+  # concern: this installs Argo CD (the deployer) + the argo.<env>.local ingress
+  # + the AppProjects (governance) INTO a floci-EKS cluster. The app's pipeline
+  # creates the cluster (Terragrunt) and its network (MetalLB/ingress), then
+  # calls this; the app only owns its own todo-app Applications. App-agnostic:
+  # it just needs a kubeconfig for the target EKS cluster (the app writes one).
+  eks:install-argo:
+    desc: 'Install Argo CD (GitOps control plane) into a floci-EKS cluster (ENV=dev|prod) + argo.<env>.local ingress + AppProjects'
+    vars:
+      ARGOCD_VERSION: '{{.ARGOCD_VERSION | default "v2.12.4"}}'
+    cmds:
+      - |
+        set -euo pipefail
+        KCFG="{{.KUBECONFIG}}"; [ -n "$KCFG" ] || KCFG="/tmp/floci-eks-{{.ENV}}.kubeconfig"
+        [ -f "$KCFG" ] || { echo "kubeconfig $KCFG not found — the app pipeline writes it (task eks:kubeconfig)" >&2; exit 1; }
+        export KUBECONFIG="$KCFG"
+        # 1) Install Argo CD (idempotent).
+        kubectl get ns argocd >/dev/null 2>&1 || kubectl create namespace argocd
+        kubectl apply -n argocd -f "https://raw.githubusercontent.com/argoproj/argo-cd/{{.ARGOCD_VERSION}}/manifests/install.yaml" >/dev/null
+        kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
+        kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=180s
+        # 2) Serve the UI as plain HTTP behind the ingress (local only).
+        kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{"data":{"server.insecure":"true"}}' >/dev/null
+        kubectl -n argocd rollout restart deploy/argocd-server >/dev/null
+        kubectl -n argocd rollout status deploy/argocd-server --timeout=120s
+        # 3) argo.<env>.local ingress (served by the cluster's ingress-nginx).
+        kubectl apply -f - <<EOF >/dev/null
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: argocd-server
+          namespace: argocd
+          annotations: { nginx.ingress.kubernetes.io/ssl-redirect: "false" }
+        spec:
+          ingressClassName: nginx
+          rules:
+            - host: argo.{{.ENV}}.local
+              http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend: { service: { name: argocd-server, port: { number: 80 } } }
+        EOF
+        # 4) Permissive AppProjects (governance lives with the platform). The
+        #    app's Applications reference project: dev / prod.
+        for p in dev prod; do
+        kubectl apply -f - <<EOF >/dev/null
+        apiVersion: argoproj.io/v1alpha1
+        kind: AppProject
+        metadata: { name: $p, namespace: argocd }
+        spec:
+          sourceRepos: ["*"]
+          destinations: [{ server: "*", namespace: "*" }]
+          clusterResourceWhitelist: [{ group: "*", kind: "*" }]
+          namespaceResourceWhitelist: [{ group: "*", kind: "*" }]
+        EOF
+        done
+        # 5) Gitea repo credential for the PLATFORM repo (gitops-apps), so this
+        #    Argo can sync the observability stack the platform owns.
+        kubectl apply -f - <<EOF >/dev/null
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: repo-gitops-apps
+          namespace: argocd
+          labels: { argocd.argoproj.io/secret-type: repository }
+        stringData:
+          type: git
+          name: gitops-apps
+          url: {{.GITEA_INCLUSTER_URL}}/{{.GITEA_ORG}}/gitops-apps.git
+          username: {{.GITEA_ADMIN_USER}}
+          password: {{.GITEA_ADMIN_PASSWORD}}
+        EOF
+        # 6) Observability Application — Grafana/Prometheus/Loki/Tempo/OTel run
+        #    IN this EKS cluster (grafana.<env>.local served by its ingress-nginx).
+        kubectl apply -f - <<EOF >/dev/null
+        apiVersion: argoproj.io/v1alpha1
+        kind: Application
+        metadata: { name: observability-{{.ENV}}, namespace: argocd }
+        spec:
+          project: {{.ENV}}
+          source:
+            repoURL: {{.GITEA_INCLUSTER_URL}}/{{.GITEA_ORG}}/gitops-apps.git
+            targetRevision: HEAD
+            path: observability/overlays/{{.ENV}}
+          destination: { server: https://kubernetes.default.svc, namespace: observability }
+          syncPolicy:
+            automated: { prune: true, selfHeal: true }
+            syncOptions: [CreateNamespace=true]
+        EOF
+        echo "installed Argo CD + observability into floci-eks (ENV={{.ENV}}) — argo.{{.ENV}}.local, grafana.{{.ENV}}.local"
 
   dns:test:
     desc: Curl the lab ingress hosts to confirm DNS + routing

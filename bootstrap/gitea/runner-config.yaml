@@ -27,6 +27,11 @@ container:
   # gives jobs a working `docker` CLI (and `kind load` reaches the kind nodes).
   network: host
   docker_host: "-"
-  options: "-v /var/run/docker.sock:/var/run/docker.sock"
+  # Also bind-mount THIS repo (local-gitops) read-only into every job at
+  # /opt/local-gitops, so the app's pipeline can invoke platform-owned tasks
+  # (e.g. `task eks:install-argo`, which installs Argo CD into the app's
+  # floci-EKS cluster). install.sh substitutes __LOCAL_GITOPS_DIR__ with the
+  # repo's host path before mounting this config.
+  options: "-v /var/run/docker.sock:/var/run/docker.sock -v __LOCAL_GITOPS_DIR__:/opt/local-gitops:ro"
   valid_volumes:
     - "**"

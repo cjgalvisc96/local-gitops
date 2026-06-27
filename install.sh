@@ -99,83 +99,6 @@ EOF
   fi
 }
 
-setup_floci() {
-  step "Setting up floci (local AWS emulator)"
-  if docker ps --format '{{.Names}}' | grep -qx "$FLOCI_CONTAINER"; then
-    log "floci already running"
-  else
-    docker rm -f "$FLOCI_CONTAINER" >/dev/null 2>&1 || true
-    log "starting floci container ($FLOCI_IMAGE) on :$FLOCI_PORT"
-    docker run -d --name "$FLOCI_CONTAINER" \
-      -p "${FLOCI_PORT}:${FLOCI_PORT}" \
-      -v /var/run/docker.sock:/var/run/docker.sock \
-      -u root \
-      --label "com.docker.compose.project=${PROJECT_NAME}" \
-      --label "com.docker.compose.service=floci" \
-      "$FLOCI_IMAGE" >/dev/null
-  fi
-  log "waiting for floci endpoint ${FLOCI_HOST_ENDPOINT} ..."
-  for _ in $(seq 1 40); do
-    curl -sf "${FLOCI_HOST_ENDPOINT}" >/dev/null 2>&1 && { log "floci is up"; return; }
-    sleep 3
-  done
-  warn "floci did not become ready in time; SSM-backed secrets may stay Missing"
-}
-
-seed_floci() {
-  step "Seeding floci infra via Terraform (ECR + SSM)"
-  if [ "$DEPLOY_APP" != "true" ]; then
-    log "DEPLOY_APP=false; skipping floci infra seed"
-    return
-  fi
-  if [ ! -d "$APP_TF_LOCAL_DIR" ]; then
-    warn "app Terraform stack not found at $APP_TF_LOCAL_DIR; skipping seed"; return
-  fi
-  require_cmd terraform || { warn "terraform not on PATH; skipping seed (run the tf-floci pipeline)"; return; }
-  require_cmd aws       || { warn "aws not on PATH; skipping floci seed"; return; }
-
-  # Run on a temp copy so the user's working tree stays clean; share state with
-  # the tf-floci pipeline through floci's S3 (same bucket/key) so neither
-  # re-creates what the other already made.
-  local ep="$FLOCI_HOST_ENDPOINT" tmp
-  tmp="$(mktemp -d)"
-  cp -r "$APP_TF_LOCAL_DIR/." "$tmp/"
-  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
-    aws --endpoint-url "$ep" s3 mb "s3://${TF_STATE_BUCKET}" >/dev/null 2>&1 || true
-  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
-    aws --endpoint-url "$ep" s3 cp "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" "$tmp/terraform.tfstate" >/dev/null 2>&1 \
-    && log "restored prior Terraform state from floci S3" || log "no prior Terraform state (fresh floci)"
-
-  if AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
-       terraform -chdir="$tmp" init -input=false >/dev/null \
-     && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
-       terraform -chdir="$tmp" apply -input=false -auto-approve \
-         -var "floci_endpoint=${ep}" -var "repository_name=${ECR_REPO_NAME}"; then
-    log "floci infra applied (ECR ${ECR_REPO_NAME} + /gitops/{dev,prod}/todo-app SSM)"
-  else
-    warn "terraform apply against floci did not fully succeed (RDS/ElastiCache may be unsupported here);"
-    warn "ECR + SSM are usually still created — verify with the tf-floci pipeline if the app stays Missing"
-  fi
-  if [ -f "$tmp/terraform.tfstate" ]; then
-    AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION="$AWS_REGION" \
-      aws --endpoint-url "$ep" s3 cp "$tmp/terraform.tfstate" "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" >/dev/null 2>&1 \
-      && log "saved Terraform state to floci S3 (shared with the tf-floci pipeline)" || true
-  fi
-  rm -rf "$tmp"
-}
-
-create_clusters() {
-  step "2. Creating kind clusters"
-  for c in "${CLUSTERS[@]}"; do
-    if kind get clusters 2>/dev/null | grep -qx "$c"; then
-      log "cluster '$c' already exists"
-    else
-      log "creating cluster '$c'"
-      kind create cluster --name "$c" --image "$NODE_IMAGE" --config "clusters/$c.yaml" --wait 120s
-    fi
-  done
-}
-
 detect_network() {
   step "2b. Detecting kind network subnet"
   local subnet prefix
@@ -194,15 +117,13 @@ detect_network() {
 }
 
 install_metallb() {
-  step "3. Installing MetalLB on all clusters"
-  local pools=("$MGMT_POOL" "$DEV_POOL" "$PROD_POOL")
-  local i=0
+  step "3. Installing MetalLB on the management cluster"
   for c in "${CLUSTERS[@]}"; do
     log "[$c] applying MetalLB ${METALLB_VERSION}"
     kc "$c" apply -f "https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml"
     kc "$c" wait --for=condition=Available deploy/controller -n metallb-system --timeout=180s
     kc "$c" wait --for=condition=Established crd/ipaddresspools.metallb.io --timeout=120s
-    log "[$c] configuring address pool ${pools[$i]}"
+    log "[$c] configuring address pool ${MGMT_POOL}"
     kc "$c" apply -f - <<EOF
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
@@ -211,7 +132,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-    - ${pools[$i]}
+    - ${MGMT_POOL}
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
@@ -222,7 +143,6 @@ spec:
   ipAddressPools:
     - pool
 EOF
-    i=$((i+1))
   done
 }
 
@@ -275,15 +195,11 @@ seed_gitea() {
     create_gitea_repo "$repo" "$auth" "$base"
     push_repo "$repo" "${REPO_ROOT}/${repo}"
   done
-  # The app repo is NOT created here — apps own their onboarding. From the app
-  # repo, after the lab is up, run (once): `task gitea:create-repo` (create the
-  # empty Gitea repo), `task argo:add-gitea-repo` (register it with Argo on
-  # dev/prod), then `task gitea:ship` (push content → pipeline → deploy).
-  # DEPLOY_APP still controls whether the app's Argo Applications are kept in
-  # platform-config (see push_repo's strip) so Argo is ready to deploy it.
-  if [ "$DEPLOY_APP" = "true" ]; then
-    log "DEPLOY_APP=true; app Argo Applications kept — onboard the app with its gitea:create-repo / argo:add-gitea-repo / gitea:ship tasks"
-  fi
+  # The app repo is NOT created here — the app owns its whole lifecycle. From the
+  # app repo, after the lab is up, run (once): `task gitea:create-repo` then
+  # `task gitea:ship`. Its pipeline provisions the floci cloud (Terragrunt) and
+  # bootstraps Argo CD INSIDE its floci-EKS clusters — this platform never
+  # deploys the app; it only seeds gitops-apps (observability).
   kill "$pf" >/dev/null 2>&1 || true
   trap - RETURN
 }
@@ -301,14 +217,6 @@ push_repo() {
   log "pushing '$repo' to Gitea"
   local tmp; tmp="$(mktemp -d)"
   cp -r "$src/." "$tmp/"
-  if [ "$repo" = "platform-config" ] && [ "$DEPLOY_APP" != "true" ]; then
-    # Keep only the core platform Applications; drop every app registration
-    # (any other manifest in envs/*/). Keeps the platform app-agnostic.
-    find "$tmp"/envs -type f -name '*.yaml' \
-      ! -name 'project.yaml' ! -name 'platform.yaml' \
-      ! -name 'observability.yaml' ! -name 'external-secrets.yaml' -delete
-    log "  (DEPLOY_APP=false: keeping only core platform apps)"
-  fi
   subst_net_tree "$tmp"
   (
     cd "$tmp"
@@ -320,94 +228,6 @@ push_repo() {
     git push -qf "http://${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}@localhost:3000/${GITEA_ORG}/${repo}.git" main
   )
   rm -rf "$tmp"
-}
-
-install_argocd() {
-  step "6. Installing Argo CD in the dev & prod clusters"
-  # Fixed admin password (login: ${ARGO_ADMIN_USER} / ${ARGO_ADMIN_PASSWORD}) so
-  # the lab uses uniform creds instead of the random argocd-initial-admin-secret.
-  local argo_pw_hash
-  argo_pw_hash="$(argocd account bcrypt --password "$ARGO_ADMIN_PASSWORD" 2>/dev/null)" \
-    || argo_pw_hash="$(htpasswd -bnBC 10 "" "$ARGO_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/$2a/')"
-  for c in "${ARGO_CLUSTERS[@]}"; do
-    log "[$c] installing Argo CD ${ARGOCD_VERSION}"
-    kc "$c" create namespace argocd --dry-run=client -o yaml | kc "$c" apply -f -
-    kc "$c" apply -n argocd \
-      -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
-    kc "$c" apply -f bootstrap/argocd/argocd-cmd-params.yaml
-    kc "$c" apply -f bootstrap/argocd/argocd-rbac.yaml
-    kc "$c" apply -f "bootstrap/argocd/ingress-${c}.yaml"
-    kc "$c" wait --for=condition=Established crd/applications.argoproj.io --timeout=180s
-    register_gitea_repos "$c"
-    # Set the admin password (bcrypt) + mtime so the random initial password is overridden.
-    kc "$c" -n argocd patch secret argocd-secret --type merge \
-      -p "{\"stringData\":{\"admin.password\":\"${argo_pw_hash}\",\"admin.passwordMtime\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" >/dev/null
-    kc "$c" -n argocd rollout restart deploy/argocd-server
-    kc "$c" -n argocd rollout status deploy/argocd-server --timeout=300s
-  done
-}
-
-register_gitea_repos() {
-  local c="$1" repo
-  # Register ONLY the platform repos. Apps register their own repo with Argo
-  # (the app's `task argo:add-gitea-repo`), after creating it and before
-  # shipping — so the platform never carries an empty/failing app repo cred.
-  local repos=("${GITEA_REPOS[@]}")
-  log "[$c] linking Argo CD to Gitea (${GITEA_GIT_URL})"
-  for repo in "${repos[@]}"; do
-    kc "$c" apply -f - <<EOF >/dev/null
-apiVersion: v1
-kind: Secret
-metadata:
-  name: repo-${repo}
-  namespace: argocd
-  labels:
-    argocd.argoproj.io/secret-type: repository
-stringData:
-  type: git
-  name: ${repo}
-  url: ${GITEA_GIT_URL}/${repo}.git
-  username: ${GITEA_ADMIN_USER}
-  password: ${GITEA_ADMIN_PASSWORD}
-EOF
-  done
-}
-
-setup_runner() {
-  step "Setting up Gitea Actions runner"
-  local pod token
-  pod="$(kc "$MGMT_CLUSTER" -n gitea get pod -l app.kubernetes.io/name=gitea \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  [ -n "$pod" ] || { warn "gitea pod not found; skipping runner setup"; return; }
-  token="$(kc "$MGMT_CLUSTER" -n gitea exec "$pod" -c gitea -- \
-    gitea actions generate-runner-token 2>/dev/null | tr -d '\r\n')"
-  [ -n "$token" ] || { warn "could not generate runner registration token; skipping runner"; return; }
-
-  docker rm -f "$RUNNER_CONTAINER" >/dev/null 2>&1 || true
-  log "starting act_runner ($RUNNER_IMAGE) registered to http://${GITEA_GIT_IP}:3000"
-  docker run -d --name "$RUNNER_CONTAINER" \
-    --network host \
-    --restart unless-stopped \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "${REPO_ROOT}/bootstrap/gitea/runner-config.yaml:/config.yaml:ro" \
-    -e CONFIG_FILE=/config.yaml \
-    -e GITEA_INSTANCE_URL="http://${GITEA_GIT_IP}:3000" \
-    -e GITEA_RUNNER_REGISTRATION_TOKEN="$token" \
-    -e GITEA_RUNNER_NAME="$RUNNER_NAME" \
-    --label "com.docker.compose.project=${PROJECT_NAME}" \
-    --label "com.docker.compose.service=gitea-runner" \
-    "$RUNNER_IMAGE" >/dev/null \
-    && log "act_runner '$RUNNER_NAME' started (label: lab)" \
-    || warn "act_runner failed to start"
-}
-
-bootstrap_root() {
-  step "8. Bootstrapping per-cluster root Applications"
-  for c in "${ARGO_CLUSTERS[@]}"; do
-    log "[$c] applying root app (envs/$c)"
-    subst_net < "bootstrap/argocd/root-${c}.yaml" | kc "$c" apply -f -
-  done
-  log "Each Argo CD now reconciles its env from platform-config/envs/<env>."
 }
 
 lb_ip() { kc "$1" -n ingress-nginx get svc ingress-nginx-controller \
@@ -422,18 +242,19 @@ wait_lb_ip() {
 setup_dns() {
   step "10a. Configuring local DNS"
   MGMT_IP="$(wait_lb_ip "$MGMT_CLUSTER")" || die "management ingress never got a LoadBalancer IP"
-  DEV_IP="$(wait_lb_ip "$DEV_CLUSTER")"   || die "dev ingress never got a LoadBalancer IP"
-  PROD_IP="$(wait_lb_ip "$PROD_CLUSTER")" || die "prod ingress never got a LoadBalancer IP"
-  log "ingress IPs  mgmt=$MGMT_IP  dev=$DEV_IP  prod=$PROD_IP"
+  log "ingress IPs  mgmt=$MGMT_IP  eks-dev=$EKS_DEV_IP  eks-prod=$EKS_PROD_IP"
 
+  # KIND serves ONLY Gitea (MGMT_IP). Everything else — Argo CD, the GitOps UI,
+  # AND observability (Grafana) — runs on the app's floci-EKS clusters and
+  # resolves to their own ingress IPs (EKS_DEV_IP/EKS_PROD_IP, pinned by the
+  # app's eks:bootstrap-net). The app owns its OWN hostname (todo-app.*.local)
+  # — see the app repo's `task eks:hosts`.
   declare -A HOSTS=(
     [gitea.dev.local]="$MGMT_IP"
-    [argo.dev.local]="$DEV_IP"
-    [grafana.dev.local]="$DEV_IP"
-    [todo-app.dev.local]="$DEV_IP"
-    [argo.prod.local]="$PROD_IP"
-    [grafana.prod.local]="$PROD_IP"
-    [todo-app.prod.local]="$PROD_IP"
+    [grafana.dev.local]="$EKS_DEV_IP"
+    [grafana.prod.local]="$EKS_PROD_IP"
+    [argo.dev.local]="$EKS_DEV_IP"
+    [argo.prod.local]="$EKS_PROD_IP"
   )
 
   if require_cmd dnsmasq && systemctl is-active --quiet systemd-resolved; then
@@ -477,136 +298,53 @@ setup_dns_hosts() {
   done
 }
 
-reconcile() {
-  step "9b. Reconciling Argo CD applications (one-time)"
-  for c in "${ARGO_CLUSTERS[@]}"; do
-    nudge_until_healthy "$c" "root"
-    nudge_until_healthy "$c"
-  done
-  log "All applications reconciled — the lab is ready to work."
-}
-
-nudge_until_healthy() {
-  local c="$1" only="${2:-}"
-  local label="${only:-all apps}"
-  local deadline=$(( SECONDS + 480 ))
-  local iter=0 skipped=" "   # apps already noted as awaiting-content (logged once)
-  log "[$c] reconciling ${label}..."
-  while :; do
-    local targets pending=0 total=0 waiting="" app name s h
-    iter=$((iter + 1))
-    if [ -n "$only" ]; then
-      targets="application.argoproj.io/${only}"
-    else
-      targets="$(kc "$c" -n argocd get applications.argoproj.io -o name 2>/dev/null || true)"
-    fi
-    while read -r app; do
-      [ -z "$app" ] && continue
-      name="${app#*/}"
-      total=$((total + 1))
-      s="$(kc "$c" -n argocd get "$app" -o jsonpath='{.status.sync.status}'   2>/dev/null || true)"
-      h="$(kc "$c" -n argocd get "$app" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
-      # The app's OWN apps point at its repo, which is onboarded separately and
-      # AFTER the lab is up (task gitea:create-repo / argo:add-gitea-repo /
-      # gitea:ship). Until then they are empty/credless, so any non-Synced state
-      # (Unknown / OutOfSync / Failed) is expected — don't wait on them. Gate on
-      # the source repo, not on a specific status (platform apps are also briefly
-      # Unknown while Argo computes their first comparison).
-      src="$(kc "$c" -n argocd get "$app" -o jsonpath='{.spec.source.repoURL}' 2>/dev/null || true)"
-      awaiting_onboarding=0
-      case "$src" in *"${APP_REPO_NAME}"*) [ "$s" != "Synced" ] && awaiting_onboarding=1 ;; esac
-      if [ "$awaiting_onboarding" = 1 ]; then
-        case "$skipped" in
-          *" $name "*) : ;;
-          *) log "[$c]   ${name}: app not onboarded yet — run (from the app) gitea:create-repo, argo:add-gitea-repo, gitea:ship"
-             skipped="${skipped}${name} " ;;
-        esac
-      elif [ "$s" != "Synced" ] || [ "$h" != "Healthy" ]; then
-        pending=$((pending + 1))
-        waiting="${waiting}${name}(${s}/${h}) "
-        kc "$c" -n argocd annotate "$app" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
-        # An OutOfSync app can wedge on a stale failed retry (e.g. the ESO
-        # webhook race: platform's ClusterSecretStore applies before the
-        # external-secrets webhook is serving). A plain refresh won't unstick a
-        # "Running" op, so every ~30s terminate the op and re-trigger a sync —
-        # which succeeds once the webhook is up. Only OutOfSync apps are kicked
-        # (Synced/Progressing rollouts are left alone), so this is safe.
-        if [ "$s" = "OutOfSync" ] && [ $(( iter % 3 )) -eq 0 ]; then
-          kc "$c" -n argocd patch "$app" --type json -p='[{"op":"remove","path":"/operation"}]' >/dev/null 2>&1 || true
-          kc "$c" -n argocd patch "$app" --type merge \
-            -p '{"operation":{"initiatedBy":{"username":"installer"},"sync":{"prune":true}}}' >/dev/null 2>&1 || true
-          log "[$c]   ${name}: still OutOfSync — re-triggered sync"
-        fi
-      fi
-    done <<< "$targets"
-    if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
-      log "[$c] ${label}: Synced & Healthy"
-      return 0
-    fi
-    [ -n "$waiting" ] && log "[$c] waiting on: ${waiting}"
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      warn "[$c] ${label} not fully healthy within timeout; check 'task k8s:status'"
-      kc "$c" -n argocd get applications.argoproj.io 2>/dev/null || true
-      return 0
-    fi
-    sleep 10
-  done
-}
-
 output() {
   step "Platform ready"
   # Uniform lab credentials (set at install); no per-cluster random password.
-  local dev_pw="$ARGO_ADMIN_PASSWORD" prod_pw="$ARGO_ADMIN_PASSWORD"
-  local dev_app="" prod_app="" app_note=""
-  if [ "$DEPLOY_APP" = "true" ]; then
-    dev_app=$'\n    todo-app     http://todo-app.dev.local'
-    prod_app=$'\n    todo-app     http://todo-app.prod.local'
-    app_note=$'\n------------------------------------------------------------------\n  todo-app: floci infra (ECR + SSM) was applied via Terraform at install.\n  Iterate through Gitea Actions (same Terraform stack + shared state):\n    - tf-floci (push infra/terraform/local, or manual)  infra changes\n    - cd       (push to main)                            build -> push -> DEV\n    - promote  (manual)                                  release to PROD'
-  fi
+  # The platform is app-agnostic. The todo-app onboards itself from its own repo
+  # and runs on its floci-EKS clusters (its OWN Argo CD), reachable once shipped.
+  local app_note=$'\n------------------------------------------------------------------\n  Everything else lives on the app\'s floci-EKS clusters (Argo CD + the app +\n  observability), stood up by the app pipeline:\n    from the app repo:  task gitea:create-repo && task gitea:ship\n    DEV(AUTO):    ci -> terragrunt apply (dev) -> deploy to floci-EKS dev (.230)\n    PROD(MANUAL): promote workflow -> terragrunt apply (prod) -> floci-EKS prod (.240)\n    Argo + Grafana resolve to the EKS ingress; Argo password: task eks:argo-password ENV=dev'
   cat <<EOF
 
 ==================================================================
   🚀  GitOps Enterprise Lab is UP
 ==================================================================
   Uniform credentials — one password for all: ${LAB_PASSWORD}
-  management cluster
+  management plane (kind) — Gitea only
     Gitea        http://gitea.dev.local         ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
-  DEV cluster (its own Argo CD)
-    Argo CD      http://argo.dev.local          (admin / ${dev_pw})
-    Grafana      http://grafana.dev.local       (admin / ${LAB_PASSWORD})${dev_app}
-  PROD cluster (its own Argo CD)
-    Argo CD      http://argo.prod.local         (admin / ${prod_pw})
-    Grafana      http://grafana.prod.local      (admin / ${LAB_PASSWORD})${prod_app}
+  workload plane (floci-EKS, once the app pipeline has run)
+    Argo CD      http://argo.dev.local          (admin / task eks:argo-password ENV=dev)
+    Grafana      http://grafana.dev.local       (admin / ${LAB_PASSWORD})
+    todo-app     http://todo-app.dev.local
 ------------------------------------------------------------------
-  Tip:  k9s --context kind-dev   |   k9s --context kind-prod${app_note}
+  Tip:  KUBECONFIG=/tmp/floci-eks-dev.kubeconfig k9s   (after task eks:kubeconfig ENV=dev)${app_note}
 ==================================================================
 EOF
 }
 
+# install.sh is the KUBERNETES half of the lab — applied (helm/kubectl) by
+# `task install` AFTER Terragrunt has provisioned the infra (floci + the kind
+# management cluster). The Gitea Actions runner is also Terraform-managed and is
+# created by `task install` on a second apply once Gitea hands out a token.
 main() {
-  log "Starting GitOps Enterprise Lab install"
+  log "Starting GitOps Enterprise Lab install (Kubernetes layer)"
   check_deps
   install_tools
   setup_aws_profile
-  setup_floci
-  seed_floci
-  create_clusters
+  if ! kubectl config get-contexts -o name 2>/dev/null | grep -qx "kind-${MGMT_CLUSTER}"; then
+    die "kind-${MGMT_CLUSTER} context not found — provision the infra first (task install applies Terragrunt + exports the kubeconfig)"
+  fi
   detect_network
   install_metallb
   install_ingress
   install_gitea
-  setup_runner
-  install_argocd
-  bootstrap_root
   setup_dns
-  reconcile
   output
 }
 
-# SYNC_ONLY re-pushes the GitOps repos (platform-config, gitops-apps, and the
-# empty app repo) to Gitea WITHOUT rebuilding the lab, so platform/Application
-# edits in this repo reconcile through Argo without a full reinstall. Backs
-# `task gitea:ship`. Requires the lab to already be running.
+# SYNC_ONLY re-pushes gitops-apps (the observability stack) to Gitea WITHOUT
+# rebuilding the lab, so platform edits reconcile through the in-EKS Argo without
+# a full reinstall. Backs `task gitea:ship`. Requires the lab to already be running.
 if [ "${SYNC_ONLY:-false}" = "true" ]; then
   log "SYNC_ONLY=true — re-pushing GitOps repos to Gitea (no cluster/Argo rebuild)"
   detect_network
