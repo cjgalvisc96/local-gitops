@@ -17,9 +17,18 @@ export RESOLVED_DROPIN="/etc/systemd/resolved.conf.d/gitops-lab.conf"
 
 export ARGO_CLUSTERS=("$DEV_CLUSTER" "$PROD_CLUSTER")
 
-export GITEA_ADMIN_USER="gitea_admin"
-export GITEA_ADMIN_PASSWORD="adminadmin1"
+# Uniform lab credentials. ONE password for everything; the user is 'admin'
+# everywhere except Gitea, which uses 'adminlocal' ('admin' is a reserved
+# username in Gitea, used for its /admin route). The Grafana admin password is
+# set separately in gitops-apps/observability/base/grafana.yaml — keep it in sync.
+export LAB_PASSWORD="adminlocal1"
+export GITEA_ADMIN_USER="adminlocal"
+export GITEA_ADMIN_PASSWORD="$LAB_PASSWORD"
 export GITEA_ORG="gitops"
+
+# Argo CD admin login (set on argocd-secret at install): the Argo default 'admin'.
+export ARGO_ADMIN_USER="admin"
+export ARGO_ADMIN_PASSWORD="$LAB_PASSWORD"
 
 export GITEA_REPOS=("platform-config" "gitops-apps")
 

@@ -43,6 +43,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Launch: launch.md
   - Getting Started: getting-started.md
   - Architecture: architecture.md
   - Guides:

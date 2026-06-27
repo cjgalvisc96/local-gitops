@@ -71,8 +71,8 @@ floci ECR is the registry of record; the running image is loaded into kind.
 
 ## Prerequisites
 
-- The app must be mirrored into Gitea (`task install:app`, or push it yourself —
-  see [GitOps Workflow](workflow.md)). The default branch in Gitea is `main`.
+- The app must be in Gitea — onboard it from the app repo (`task gitea:create-repo`,
+  then `task gitea:ship` to push the code). The default branch in Gitea is `main`.
 - The runner needs outbound internet on first use to pull `actions/checkout` and
   the job image.
 - The pipelines push back to the repo with the Actions token (`permissions:

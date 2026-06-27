@@ -275,15 +275,14 @@ seed_gitea() {
     create_gitea_repo "$repo" "$auth" "$base"
     push_repo "$repo" "${REPO_ROOT}/${repo}"
   done
+  # The app repo is NOT created here — apps own their onboarding. From the app
+  # repo, after the lab is up, run (once): `task gitea:create-repo` (create the
+  # empty Gitea repo), `task argo:add-gitea-repo` (register it with Argo on
+  # dev/prod), then `task gitea:ship` (push content → pipeline → deploy).
+  # DEPLOY_APP still controls whether the app's Argo Applications are kept in
+  # platform-config (see push_repo's strip) so Argo is ready to deploy it.
   if [ "$DEPLOY_APP" = "true" ]; then
-    if [ -d "$APP_REPO_PATH" ]; then
-      create_gitea_repo "$APP_REPO_NAME" "$auth" "$base"
-      push_app_repo
-    else
-      warn "app repo not found at $APP_REPO_PATH; skipping (set APP_REPO_PATH)"
-    fi
-  else
-    log "DEPLOY_APP=false; skipping todo-app repo mirror"
+    log "DEPLOY_APP=true; app Argo Applications kept — onboard the app with its gitea:create-repo / argo:add-gitea-repo / gitea:ship tasks"
   fi
   kill "$pf" >/dev/null 2>&1 || true
   trap - RETURN
@@ -323,25 +322,13 @@ push_repo() {
   rm -rf "$tmp"
 }
 
-push_app_repo() {
-  log "mirroring app repo '${APP_REPO_NAME}' (tracked files) to Gitea"
-  local tmp; tmp="$(mktemp -d)"
-  git -C "$APP_REPO_PATH" archive --format=tar HEAD | tar -x -C "$tmp" 2>/dev/null \
-    || { warn "could not archive $APP_REPO_PATH (is it a git repo with commits?)"; rm -rf "$tmp"; return; }
-  (
-    cd "$tmp"
-    git init -q -b main
-    git config user.email "installer@gitops.local"
-    git config user.name "installer"
-    git add -A
-    git commit -q -m "chore: mirror ${APP_REPO_NAME} from install.sh"
-    git push -qf "http://${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}@localhost:3000/${GITEA_ORG}/${APP_REPO_NAME}.git" main
-  )
-  rm -rf "$tmp"
-}
-
 install_argocd() {
   step "6. Installing Argo CD in the dev & prod clusters"
+  # Fixed admin password (login: ${ARGO_ADMIN_USER} / ${ARGO_ADMIN_PASSWORD}) so
+  # the lab uses uniform creds instead of the random argocd-initial-admin-secret.
+  local argo_pw_hash
+  argo_pw_hash="$(argocd account bcrypt --password "$ARGO_ADMIN_PASSWORD" 2>/dev/null)" \
+    || argo_pw_hash="$(htpasswd -bnBC 10 "" "$ARGO_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/$2a/')"
   for c in "${ARGO_CLUSTERS[@]}"; do
     log "[$c] installing Argo CD ${ARGOCD_VERSION}"
     kc "$c" create namespace argocd --dry-run=client -o yaml | kc "$c" apply -f -
@@ -352,6 +339,9 @@ install_argocd() {
     kc "$c" apply -f "bootstrap/argocd/ingress-${c}.yaml"
     kc "$c" wait --for=condition=Established crd/applications.argoproj.io --timeout=180s
     register_gitea_repos "$c"
+    # Set the admin password (bcrypt) + mtime so the random initial password is overridden.
+    kc "$c" -n argocd patch secret argocd-secret --type merge \
+      -p "{\"stringData\":{\"admin.password\":\"${argo_pw_hash}\",\"admin.passwordMtime\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" >/dev/null
     kc "$c" -n argocd rollout restart deploy/argocd-server
     kc "$c" -n argocd rollout status deploy/argocd-server --timeout=300s
   done
@@ -359,8 +349,10 @@ install_argocd() {
 
 register_gitea_repos() {
   local c="$1" repo
+  # Register ONLY the platform repos. Apps register their own repo with Argo
+  # (the app's `task argo:add-gitea-repo`), after creating it and before
+  # shipping — so the platform never carries an empty/failing app repo cred.
   local repos=("${GITEA_REPOS[@]}")
-  [ "$DEPLOY_APP" = "true" ] && repos+=("$APP_REPO_NAME")
   log "[$c] linking Argo CD to Gitea (${GITEA_GIT_URL})"
   for repo in "${repos[@]}"; do
     kc "$c" apply -f - <<EOF >/dev/null
@@ -407,29 +399,6 @@ setup_runner() {
     "$RUNNER_IMAGE" >/dev/null \
     && log "act_runner '$RUNNER_NAME' started (label: lab)" \
     || warn "act_runner failed to start"
-}
-
-build_and_load_image() {
-  step "7. Building & loading the todo-app image"
-  if [ "$DEPLOY_APP" != "true" ]; then
-    log "DEPLOY_APP=false; skipping app image build (set DEPLOY_APP=true to deploy)"
-    return
-  fi
-  if [ ! -d "$APP_REPO_PATH" ]; then
-    warn "app repo not found at $APP_REPO_PATH; skipping image build"
-    return
-  fi
-  for tag in dev prod; do
-    log "building ${APP_IMAGE}:${tag}"
-    docker build -t "${APP_IMAGE}:${tag}" "$APP_REPO_PATH" >/dev/null \
-      || { warn "image build failed for ${APP_IMAGE}:${tag}"; return; }
-  done
-  for c in "${ARGO_CLUSTERS[@]}"; do
-    for tag in dev prod; do
-      log "[$c] loading ${APP_IMAGE}:${tag}"
-      kind load docker-image "${APP_IMAGE}:${tag}" --name "$c" >/dev/null 2>&1 || true
-    done
-  done
 }
 
 bootstrap_root() {
@@ -521,9 +490,11 @@ nudge_until_healthy() {
   local c="$1" only="${2:-}"
   local label="${only:-all apps}"
   local deadline=$(( SECONDS + 480 ))
+  local iter=0 skipped=" "   # apps already noted as awaiting-content (logged once)
   log "[$c] reconciling ${label}..."
   while :; do
-    local targets pending=0 total=0 app s h
+    local targets pending=0 total=0 waiting="" app name s h
+    iter=$((iter + 1))
     if [ -n "$only" ]; then
       targets="application.argoproj.io/${only}"
     else
@@ -531,18 +502,48 @@ nudge_until_healthy() {
     fi
     while read -r app; do
       [ -z "$app" ] && continue
+      name="${app#*/}"
       total=$((total + 1))
       s="$(kc "$c" -n argocd get "$app" -o jsonpath='{.status.sync.status}'   2>/dev/null || true)"
       h="$(kc "$c" -n argocd get "$app" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
-      if [ "$s" != "Synced" ] || [ "$h" != "Healthy" ]; then
+      # The app's OWN apps point at its repo, which is onboarded separately and
+      # AFTER the lab is up (task gitea:create-repo / argo:add-gitea-repo /
+      # gitea:ship). Until then they are empty/credless, so any non-Synced state
+      # (Unknown / OutOfSync / Failed) is expected — don't wait on them. Gate on
+      # the source repo, not on a specific status (platform apps are also briefly
+      # Unknown while Argo computes their first comparison).
+      src="$(kc "$c" -n argocd get "$app" -o jsonpath='{.spec.source.repoURL}' 2>/dev/null || true)"
+      awaiting_onboarding=0
+      case "$src" in *"${APP_REPO_NAME}"*) [ "$s" != "Synced" ] && awaiting_onboarding=1 ;; esac
+      if [ "$awaiting_onboarding" = 1 ]; then
+        case "$skipped" in
+          *" $name "*) : ;;
+          *) log "[$c]   ${name}: app not onboarded yet — run (from the app) gitea:create-repo, argo:add-gitea-repo, gitea:ship"
+             skipped="${skipped}${name} " ;;
+        esac
+      elif [ "$s" != "Synced" ] || [ "$h" != "Healthy" ]; then
         pending=$((pending + 1))
+        waiting="${waiting}${name}(${s}/${h}) "
         kc "$c" -n argocd annotate "$app" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+        # An OutOfSync app can wedge on a stale failed retry (e.g. the ESO
+        # webhook race: platform's ClusterSecretStore applies before the
+        # external-secrets webhook is serving). A plain refresh won't unstick a
+        # "Running" op, so every ~30s terminate the op and re-trigger a sync —
+        # which succeeds once the webhook is up. Only OutOfSync apps are kicked
+        # (Synced/Progressing rollouts are left alone), so this is safe.
+        if [ "$s" = "OutOfSync" ] && [ $(( iter % 3 )) -eq 0 ]; then
+          kc "$c" -n argocd patch "$app" --type json -p='[{"op":"remove","path":"/operation"}]' >/dev/null 2>&1 || true
+          kc "$c" -n argocd patch "$app" --type merge \
+            -p '{"operation":{"initiatedBy":{"username":"installer"},"sync":{"prune":true}}}' >/dev/null 2>&1 || true
+          log "[$c]   ${name}: still OutOfSync — re-triggered sync"
+        fi
       fi
     done <<< "$targets"
     if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
       log "[$c] ${label}: Synced & Healthy"
       return 0
     fi
+    [ -n "$waiting" ] && log "[$c] waiting on: ${waiting}"
     if [ "$SECONDS" -ge "$deadline" ]; then
       warn "[$c] ${label} not fully healthy within timeout; check 'task k8s:status'"
       kc "$c" -n argocd get applications.argoproj.io 2>/dev/null || true
@@ -554,11 +555,8 @@ nudge_until_healthy() {
 
 output() {
   step "Platform ready"
-  local dev_pw prod_pw
-  dev_pw="$(kc "$DEV_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
-    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
-  prod_pw="$(kc "$PROD_CLUSTER" -n argocd get secret argocd-initial-admin-secret \
-    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  # Uniform lab credentials (set at install); no per-cluster random password.
+  local dev_pw="$ARGO_ADMIN_PASSWORD" prod_pw="$ARGO_ADMIN_PASSWORD"
   local dev_app="" prod_app="" app_note=""
   if [ "$DEPLOY_APP" = "true" ]; then
     dev_app=$'\n    todo-app     http://todo-app.dev.local'
@@ -570,20 +568,16 @@ output() {
 ==================================================================
   🚀  GitOps Enterprise Lab is UP
 ==================================================================
+  Uniform credentials — one password for all: ${LAB_PASSWORD}
   management cluster
     Gitea        http://gitea.dev.local         ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
   DEV cluster (its own Argo CD)
-    Argo CD      http://argo.dev.local          (admin / ${dev_pw:-<see below>})
-    Grafana      http://grafana.dev.local       (admin / admin)${dev_app}
+    Argo CD      http://argo.dev.local          (admin / ${dev_pw})
+    Grafana      http://grafana.dev.local       (admin / ${LAB_PASSWORD})${dev_app}
   PROD cluster (its own Argo CD)
-    Argo CD      http://argo.prod.local         (admin / ${prod_pw:-<see below>})
-    Grafana      http://grafana.prod.local      (admin / admin)${prod_app}
+    Argo CD      http://argo.prod.local         (admin / ${prod_pw})
+    Grafana      http://grafana.prod.local      (admin / ${LAB_PASSWORD})${prod_app}
 ------------------------------------------------------------------
-  Argo CD admin password (per cluster):
-    kubectl --context kind-dev  -n argocd get secret argocd-initial-admin-secret \\
-      -o jsonpath='{.data.password}' | base64 -d
-    kubectl --context kind-prod -n argocd get secret argocd-initial-admin-secret \\
-      -o jsonpath='{.data.password}' | base64 -d
   Tip:  k9s --context kind-dev   |   k9s --context kind-prod${app_note}
 ==================================================================
 EOF
@@ -603,11 +597,22 @@ main() {
   install_gitea
   setup_runner
   install_argocd
-  build_and_load_image
   bootstrap_root
   setup_dns
   reconcile
   output
 }
+
+# SYNC_ONLY re-pushes the GitOps repos (platform-config, gitops-apps, and the
+# empty app repo) to Gitea WITHOUT rebuilding the lab, so platform/Application
+# edits in this repo reconcile through Argo without a full reinstall. Backs
+# `task gitea:ship`. Requires the lab to already be running.
+if [ "${SYNC_ONLY:-false}" = "true" ]; then
+  log "SYNC_ONLY=true — re-pushing GitOps repos to Gitea (no cluster/Argo rebuild)"
+  detect_network
+  seed_gitea
+  log "pushed; Argo reconciles on its next poll (force now with: task k8s:sync ENV=dev)"
+  exit 0
+fi
 
 main "$@"

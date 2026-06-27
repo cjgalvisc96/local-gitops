@@ -13,6 +13,10 @@ task install    # build & wire everything (idempotent, re-runnable)
 task prune      # tear it all down
 ```
 
+The platform comes up **empty of apps** — each app onboards itself into the running lab. See the
+**[Launch](docs/launch.md)** page for the simple, step-by-step "how to run everything" (build the
+lab, then add an app with its `gitea:create-repo` / `argo:add-gitea-repo` / `gitea:ship` tasks).
+
 ## Documentation
 
 The full documentation lives in [MkDocs](https://www.mkdocs.org/) — one place,

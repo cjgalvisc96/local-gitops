@@ -8,15 +8,18 @@ everything.
 | Task | Does |
 |------|------|
 | `task tools` | install the pinned CLI toolchain via mise |
-| `task install` | build the full lab |
-| `task install:app` | build the lab and deploy the todo-app (`DEPLOY_APP=true`) |
+| `task install` | build the full lab (app-agnostic — no specific app) |
+| `task install:app` | build the lab and keep an app's Argo Applications in `platform-config` (`DEPLOY_APP=true`) |
+| `task gitea:ship` | re-push `platform-config` + `gitops-apps` so Argo reconciles platform edits (no reinstall) |
 | `task prune` | tear down clusters, floci, DNS and Docker artifacts |
 | `task prune:all` | the above and uninstall the mise-managed tools |
 
-With `DEPLOY_APP=true`, `install.sh` also starts the **Gitea Actions runner** and
-applies the app's floci **Terraform** stack at bootstrap; `prune` removes the
-runner. The app's own pipelines drive build/deploy/promote — see
-[CI/CD](cicd.md).
+`install.sh` always starts the **Gitea Actions runner** (the lab's CI/CD); `prune`
+removes it. The platform installs app-agnostic — **apps onboard themselves** into
+the running lab (the todo-app uses its `gitea:create-repo` / `argo:add-gitea-repo`
+/ `gitea:ship` tasks; see [Launch](launch.md)). `DEPLOY_APP=true` only seeds an
+app's floci state and keeps its Applications at bootstrap. The app's own pipelines
+drive build/deploy/promote — see [CI/CD](cicd.md).
 
 ## Validation
 

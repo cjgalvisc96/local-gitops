@@ -25,9 +25,16 @@ tasks:
       - ./install.sh
 
   install:app:
-    desc: Build the lab AND deploy the todo-app (DEPLOY_APP=true)
+    desc: Build the lab AND wire Argo to deploy the app (empty repo + Argo repo URL + Applications; DEPLOY_APP=true). Push content with the app's `task gitea:ship`.
     cmds:
       - DEPLOY_APP=true ./install.sh
+
+  gitea:ship:
+    desc: Re-push the platform GitOps repos (platform-config, gitops-apps) to Gitea so Argo reconciles your changes — no reinstall. Needs the lab running.
+    cmds:
+      # DEPLOY_APP=true pushes platform-config verbatim (keeps the app's Argo
+      # Applications); SYNC_ONLY skips the cluster/Argo rebuild.
+      - SYNC_ONLY=true DEPLOY_APP=true ./install.sh
 
   prune:
     desc: Tear down clusters, floci, DNS and Docker artifacts
@@ -103,12 +110,12 @@ tasks:
         fi
 
   argo:password:
-    desc: Print the Argo CD admin password for each workload cluster
+    # Fixed lab creds (set on argocd-secret at install) — keep in sync with
+    # LAB_PASSWORD in lib/common.sh.
+    desc: 'Print the Argo CD admin login for each workload cluster (admin / adminlocal1)'
     cmds:
       - for: { var: ARGO_CLUSTERS }
-        cmd: |
-          pw=$(kubectl --context kind-{{.ITEM}} -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)
-          echo "kind-{{.ITEM}}: admin / $pw"
+        cmd: 'echo "kind-{{.ITEM}}: admin / adminlocal1"'
 
   argo:repos:
     desc: Show the Gitea repositories Argo CD is linked to (ENV=dev)

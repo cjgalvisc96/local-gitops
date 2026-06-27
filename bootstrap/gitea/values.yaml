@@ -10,8 +10,8 @@ ingress:
 
 gitea:
   admin:
-    username: gitea_admin
-    password: adminadmin1
+    username: adminlocal
+    password: adminlocal1
     email: admin@gitops.local
   config:
     server:
