@@ -1,0 +1,23 @@
+# Argo Application that deploys the observability stack (Grafana/Prometheus/
+# Loki/Tempo/OTel) INTO this floci-EKS cluster (grafana.<env>.local). __ENV__ and
+# __GITEA_REPO_URL__ are rendered per env by `task eks:install-argo`.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-__ENV__
+  namespace: argocd
+spec:
+  project: __ENV__
+  source:
+    repoURL: __GITEA_REPO_URL__
+    targetRevision: HEAD
+    path: observability/overlays/__ENV__
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

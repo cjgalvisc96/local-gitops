@@ -246,22 +246,11 @@ tasks:
         kubectl apply -f "https://raw.githubusercontent.com/metallb/metallb/{{.METALLB_VERSION}}/config/manifests/metallb-native.yaml" >/dev/null
         kubectl -n metallb-system rollout status deploy/controller --timeout=180s
         kubectl -n metallb-system rollout status daemonset/speaker --timeout=180s
-        # 2) Single-IP pool + L2 advertisement (retry: the validating webhook may
-        #    take a moment to accept connections after the controller is Ready).
+        # 2) Single-IP pool + L2 advertisement (declarative manifest, env IP
+        #    rendered in; retry while the validating webhook comes up).
         for i in $(seq 1 10); do
-          kubectl apply -f - >/dev/null 2>&1 <<EOF && break || sleep 6
-        apiVersion: metallb.io/v1beta1
-        kind: IPAddressPool
-        metadata: { name: floci-eks, namespace: metallb-system }
-        spec:
-          addresses: ["{{.EKS_LB_IP}}/32"]
-        ---
-        apiVersion: metallb.io/v1beta1
-        kind: L2Advertisement
-        metadata: { name: floci-eks, namespace: metallb-system }
-        spec:
-          ipAddressPools: [floci-eks]
-        EOF
+          sed "s|__EKS_LB_IP__|{{.EKS_LB_IP}}|g" bootstrap/eks/metallb-pool.yaml \
+            | kubectl apply -f - >/dev/null 2>&1 && break || sleep 6
         done
         # 3) ingress-nginx (cloud manifest -> a LoadBalancer svc MetalLB fills).
         kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/{{.INGRESS_NGINX_REF}}/deploy/static/provider/cloud/deploy.yaml" >/dev/null
@@ -340,40 +329,12 @@ tasks:
         kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{"data":{"server.insecure":"true"}}' >/dev/null
         kubectl -n argocd rollout restart deploy/argocd-server >/dev/null
         kubectl -n argocd rollout status deploy/argocd-server --timeout=120s
-        # 3) argo.<env>.local ingress (served by the cluster's ingress-nginx).
-        kubectl apply -f - <<EOF >/dev/null
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        metadata:
-          name: argocd-server
-          namespace: argocd
-          annotations: { nginx.ingress.kubernetes.io/ssl-redirect: "false" }
-        spec:
-          ingressClassName: nginx
-          rules:
-            - host: argo.{{.ENV}}.local
-              http:
-                paths:
-                  - path: /
-                    pathType: Prefix
-                    backend: { service: { name: argocd-server, port: { number: 80 } } }
-        EOF
-        # 4) Permissive AppProjects (governance lives with the platform). The
-        #    app's Applications reference project: dev / prod.
-        for p in dev prod; do
-        kubectl apply -f - <<EOF >/dev/null
-        apiVersion: argoproj.io/v1alpha1
-        kind: AppProject
-        metadata: { name: $p, namespace: argocd }
-        spec:
-          sourceRepos: ["*"]
-          destinations: [{ server: "*", namespace: "*" }]
-          clusterResourceWhitelist: [{ group: "*", kind: "*" }]
-          namespaceResourceWhitelist: [{ group: "*", kind: "*" }]
-        EOF
-        done
-        # 5) Gitea repo credential for the PLATFORM repo (gitops-apps), so this
-        #    Argo can sync the observability stack the platform owns.
+        # 3) argo.<env>.local ingress + permissive AppProjects (declarative).
+        sed "s|__ENV__|{{.ENV}}|g" bootstrap/eks/argocd-ingress.yaml | kubectl apply -f - >/dev/null
+        kubectl apply -f bootstrap/eks/appprojects.yaml >/dev/null
+        # 4) Gitea repo credential for the PLATFORM repo (gitops-apps), so this
+        #    Argo can sync the observability stack — a Secret with creds, so it is
+        #    rendered at runtime, never committed.
         kubectl apply -f - <<EOF >/dev/null
         apiVersion: v1
         kind: Secret
@@ -388,23 +349,12 @@ tasks:
           username: {{.GITEA_ADMIN_USER}}
           password: {{.GITEA_ADMIN_PASSWORD}}
         EOF
-        # 6) Observability Application — Grafana/Prometheus/Loki/Tempo/OTel run
-        #    IN this EKS cluster (grafana.<env>.local served by its ingress-nginx).
-        kubectl apply -f - <<EOF >/dev/null
-        apiVersion: argoproj.io/v1alpha1
-        kind: Application
-        metadata: { name: observability-{{.ENV}}, namespace: argocd }
-        spec:
-          project: {{.ENV}}
-          source:
-            repoURL: {{.GITEA_INCLUSTER_URL}}/{{.GITEA_ORG}}/gitops-apps.git
-            targetRevision: HEAD
-            path: observability/overlays/{{.ENV}}
-          destination: { server: https://kubernetes.default.svc, namespace: observability }
-          syncPolicy:
-            automated: { prune: true, selfHeal: true }
-            syncOptions: [CreateNamespace=true]
-        EOF
+        # 5) Observability Application — Grafana/Prometheus/Loki/Tempo/OTel run IN
+        #    this EKS cluster (grafana.<env>.local). Declarative manifest, env +
+        #    repo URL rendered in.
+        sed -e "s|__ENV__|{{.ENV}}|g" \
+            -e "s|__GITEA_REPO_URL__|{{.GITEA_INCLUSTER_URL}}/{{.GITEA_ORG}}/gitops-apps.git|g" \
+            bootstrap/eks/observability-app.yaml | kubectl apply -f - >/dev/null
         echo "installed Argo CD + observability into floci-eks (ENV={{.ENV}}) — argo.{{.ENV}}.local, grafana.{{.ENV}}.local"
 
   dns:test:
