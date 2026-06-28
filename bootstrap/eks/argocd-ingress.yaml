@@ -1,5 +1,3 @@
-# Argo CD UI ingress — plain HTTP, served by the cluster's ingress-nginx.
-# __ENV__ is rendered per env by `task eks:install-argo` (argo.dev/prod.local).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

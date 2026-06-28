@@ -1,7 +1,8 @@
 site_name: GitOps Enterprise Lab
 site_description: >-
-  A fully local, reproducible multi-cluster GitOps platform — three kind
-  clusters managed from Git, with per-cluster Argo CD, observability and secrets.
+  A fully local, reproducible multi-cluster GitOps platform — a kind management
+  cluster plus two floci-EKS workload clusters managed from Git, with per-cluster
+  Argo CD, observability and secrets. The platform owns the clusters; apps deploy onto it.
 docs_dir: docs
 
 theme:

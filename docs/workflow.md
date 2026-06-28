@@ -12,8 +12,8 @@ edit manifest ─▶ commit ─▶ push to Gitea ─▶ Argo CD syncs ─▶ clu
 
 ## Make a change
 
-1. Edit the relevant base or overlay under `gitops-apps/<stack>/…`, or the env
-   `Application` under `platform-config/envs/<env>/…`.
+1. Edit the relevant base or overlay under `gitops-apps/<stack>/…` (for the
+   platform, that is the `observability` stack).
 2. Validate locally before pushing:
    ```bash
    task validate          # render every overlay, parse YAML, lint scripts
@@ -31,13 +31,11 @@ separate Argo CDs, so you promote by editing the prod side of the repo.
 
 1. Prove the change in **DEV** first and confirm it is healthy:
    ```bash
-   kubectl --context kind-dev -n argocd get applications.argoproj.io
+   task k8s:apps ENV=dev   # in-EKS Argo applications on the dev cluster
    ```
 2. Diff the two sides and copy the proven artifact/config into prod:
    ```bash
    diff -ru gitops-apps/<stack>/overlays/dev gitops-apps/<stack>/overlays/prod
-   # or, for an env Application:
-   diff -u platform-config/envs/dev/<app>.yaml platform-config/envs/prod/<app>.yaml
    ```
    Promote the *image tag / config value* — keep prod-specific values (host,
    replicas, `values-prod.yaml`) intact.

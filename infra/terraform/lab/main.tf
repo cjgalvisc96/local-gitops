@@ -1,6 +1,3 @@
-############################################
-# floci — the local AWS (LocalStack) emulator
-############################################
 resource "docker_image" "floci" {
   name         = var.floci_image
   keep_locally = true
@@ -17,7 +14,7 @@ resource "docker_container" "floci" {
     external = var.floci_port
   }
 
-  # floci spins up child containers (e.g. the EKS k3s nodes) on the host daemon.
+  # floci spins up child containers (the EKS k3s nodes) on the host daemon.
   volumes {
     host_path      = "/var/run/docker.sock"
     container_path = "/var/run/docker.sock"
@@ -33,16 +30,7 @@ resource "docker_container" "floci" {
   }
 }
 
-############################################
-# floci-EKS workload clusters (k3s)
-#
-# The platform stands up the app's dev/prod workload clusters as k3s containers
-# — the same shape floci's EKS plugin produces (name floci-eks-<app>-<env>,
-# kubeconfig at /etc/rancher/k3s/k3s.yaml, API on 6443). traefik + servicelb are
-# disabled so the platform's MetalLB + ingress-nginx own LB/ingress. The app's
-# tasks reference these by name; `task eks:bootstrap` then wires Argo +
-# observability so argo.<env>.local / grafana.<env>.local work before any deploy.
-############################################
+# traefik + servicelb disabled so the platform's MetalLB + ingress-nginx own LB/ingress.
 resource "docker_image" "k3s" {
   name         = var.k3s_image
   keep_locally = true
@@ -57,17 +45,14 @@ resource "docker_container" "eks" {
   restart    = "unless-stopped"
   command    = ["server", "--disable=traefik", "--disable=servicelb", "--tls-san=127.0.0.1", "--write-kubeconfig-mode=644"]
 
-  # Join the kind network (created with the management cluster) so MetalLB can
-  # L2-advertise the EKS LB IPs (.230/.240) where the host + Gitea LB can reach
-  # them, and the in-EKS Argo can pull from Gitea at 172.18.255.209. kind's
-  # bridge has outbound NAT, so image pulls still work.
+  # Must join the kind network so MetalLB can L2-advertise the EKS LB IPs
+  # (.230/.240) where the host + Gitea LB reach them, and the in-EKS Argo can
+  # pull from Gitea at 172.18.255.209.
   networks_advanced {
     name = "kind"
   }
   depends_on = [kind_cluster.management]
 
-  # Fixed host API port per env (dev=6443, prod=6444) — deterministic for
-  # Terraform; `task eks:kubeconfig` reads whatever HostPort docker reports.
   ports {
     internal = 6443
     external = 6443 + each.value
@@ -89,22 +74,13 @@ resource "docker_container" "eks" {
   }
 }
 
-############################################
-# kind — the management cluster (Gitea host)
-############################################
 resource "kind_cluster" "management" {
   name           = var.mgmt_cluster
   node_image     = var.node_image
   wait_for_ready = true
 }
 
-############################################
-# Gitea Actions runner
-#
-# Created on the SECOND apply (once Gitea is up and `task install` has fetched a
-# registration token). The rendered runner-config bind-mounts this repo into every
-# job at /opt/local-gitops, so the app pipeline can call platform-owned tasks.
-############################################
+# Created on the SECOND apply, once `task install` has fetched a registration token from a running Gitea.
 resource "local_file" "runner_config" {
   count    = var.runner_token != "" ? 1 : 0
   filename = "${var.repo_root}/bootstrap/gitea/runner-config.rendered.yaml"

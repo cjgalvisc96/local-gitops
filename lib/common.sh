@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# KIND runs ONLY the management cluster — it hosts Gitea (source of truth) + the
-# Actions runner. There are no kind dev/prod clusters anymore: Argo CD, the app
-# AND observability all live on the app's floci-EKS dev/prod clusters.
 export MGMT_CLUSTER="management"
 export CLUSTERS=("$MGMT_CLUSTER")
 
 export NODE_IMAGE="kindest/node:v1.31.4"
 export METALLB_VERSION="v0.14.8"
 export INGRESS_NGINX_VERSION="4.11.3"
-# Gitea chart 12.x ships Gitea >= 1.24, which has the Actions workflow-dispatch
-# UI button + API — needed to launch the manual PROD promote (task gitea:promote).
-# (10.x shipped 1.22, which had neither.)
+# Gitea chart 12.x ships Gitea >= 1.24 (Actions workflow-dispatch UI + API); 10.x shipped 1.22 without it.
 export GITEA_CHART_VERSION="12.4.0"
 
 export DNS_PORT="5300"
@@ -18,26 +13,14 @@ export DNS_PIDFILE="/tmp/gitops-dnsmasq.pid"
 export DNS_CONFFILE="/tmp/gitops-dnsmasq.conf"
 export RESOLVED_DROPIN="/etc/systemd/resolved.conf.d/gitops-lab.conf"
 
-
-# Uniform lab credentials. ONE password for everything; the user is 'admin'
-# everywhere except Gitea, which uses 'adminlocal' ('admin' is a reserved
-# username in Gitea, used for its /admin route). The Grafana admin password is
-# set separately in gitops-apps/observability/base/grafana.yaml — keep it in sync.
-# (The in-EKS Argo CD admin password is the cluster's argocd-initial-admin-secret
-# — fetch it with `task argo:password ENV=<env>`.)
+# Grafana admin password is set separately in gitops-apps/observability/base/grafana.yaml — keep in sync.
 export LAB_PASSWORD="adminlocal1"
 export GITEA_ADMIN_USER="adminlocal"
 export GITEA_ADMIN_PASSWORD="$LAB_PASSWORD"
 export GITEA_ORG="gitops"
 
-# Only gitops-apps is seeded into Gitea now (the observability stack the in-EKS
-# Argo syncs). The old platform-config app-of-apps is gone with the kind Argo.
 export GITEA_REPOS=("gitops-apps")
 
-# This platform is app-agnostic: it never deploys the todo-app. The app owns its
-# whole lifecycle — its Gitea pipeline provisions its floci cloud (Terragrunt),
-# bootstraps Argo CD INSIDE its floci-EKS clusters, and deploys there. The
-# platform only provides Gitea, observability and the kind management plane.
 export APP_IMAGE="local/todo-app"
 
 export PROJECT_NAME="${PROJECT_NAME:-local-gitops}"
@@ -60,11 +43,7 @@ export NET_PREFIX="$DEFAULT_NET_PREFIX"
 apply_net_prefix() {
   NET_PREFIX="$1"
   export NET_PREFIX
-  # KIND (management) only needs a small pool for Gitea's LoadBalancer.
   export MGMT_POOL="${NET_PREFIX}.255.200-${NET_PREFIX}.255.209"
-  # The app's floci-EKS clusters advertise their OWN ingress IPs via an in-cluster
-  # MetalLB (this Taskfile's eks:bootstrap-net pins the same IPs): dev = .230,
-  # prod = .240 — chosen clear of the kind pool above.
   export EKS_DEV_IP="${NET_PREFIX}.255.230"
   export EKS_PROD_IP="${NET_PREFIX}.255.240"
   export GITEA_GIT_IP="${NET_PREFIX}.255.209"

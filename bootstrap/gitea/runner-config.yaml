@@ -4,9 +4,6 @@ log:
 runner:
   capacity: 1
   timeout: 1h
-  # One label, mapped to a docker job image. Workflows target it with
-  # `runs-on: lab`. The image carries docker/git/python; the lab tools
-  # (aws, kind, yq) are installed per-job by the setup-lab composite action.
   labels:
     - "lab:docker://catthehacker/ubuntu:act-22.04"
 
@@ -14,24 +11,10 @@ cache:
   enabled: false
 
 container:
-  # Host networking + the host docker socket make a job behave exactly like a
-  # shell on the host: it reaches floci at localhost:4566 / its registry, the
-  # MetalLB Gitea IP (routable from a Linux host), builds against the host
-  # daemon, and `kind load`s straight into the kind node containers.
-  #
-  # `docker_host: "-"` lets act_runner auto-find the host daemon to spawn job
-  # containers, but it does NOT mount the socket inside those jobs — so steps
-  # that shell out to `docker` (the CD build/push) fail with
-  # "/var/run/docker.sock: no such file or directory". act_runner 0.2.11 has no
-  # "automount", so we bind-mount the socket into every job via `options`. That
-  # gives jobs a working `docker` CLI (and `kind load` reaches the kind nodes).
   network: host
   docker_host: "-"
-  # Also bind-mount THIS repo (local-gitops) read-only into every job at
-  # /opt/local-gitops, so the app's pipeline can invoke platform-owned tasks
-  # (e.g. `task eks:install-argo`, which installs Argo CD into the app's
-  # floci-EKS cluster). install.sh substitutes __LOCAL_GITOPS_DIR__ with the
-  # repo's host path before mounting this config.
+  # act_runner 0.2.11 has no automount, so bind-mount the docker socket into every job or docker steps fail.
+  # install.sh substitutes __LOCAL_GITOPS_DIR__ with the repo's host path before mounting this config.
   options: "-v /var/run/docker.sock:/var/run/docker.sock -v __LOCAL_GITOPS_DIR__:/opt/local-gitops:ro"
   valid_volumes:
     - "**"

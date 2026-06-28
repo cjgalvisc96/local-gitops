@@ -9,7 +9,6 @@ variable "repo_root" {
   type        = string
 }
 
-# --- floci (local AWS emulator) -------------------------------------------
 variable "floci_image" {
   description = "floci (LocalStack) image."
   type        = string
@@ -28,7 +27,6 @@ variable "floci_port" {
   default     = 4566
 }
 
-# --- floci-EKS workload clusters (k3s the platform stands up for the apps) ---
 variable "app_project" {
   description = "App project embedded in the floci-EKS container names (floci-eks-<app_project>-<env>), matching the app's task references."
   type        = string
@@ -47,7 +45,6 @@ variable "eks_envs" {
   default     = ["dev", "prod"]
 }
 
-# --- kind management cluster ----------------------------------------------
 variable "node_image" {
   description = "kind node image."
   type        = string
@@ -60,7 +57,6 @@ variable "mgmt_cluster" {
   default     = "management"
 }
 
-# --- Gitea Actions runner --------------------------------------------------
 variable "runner_image" {
   description = "Gitea act_runner image."
   type        = string

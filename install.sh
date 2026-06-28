@@ -195,11 +195,6 @@ seed_gitea() {
     create_gitea_repo "$repo" "$auth" "$base"
     push_repo "$repo" "${REPO_ROOT}/${repo}"
   done
-  # The app repo is NOT created here — the app owns its whole lifecycle. From the
-  # app repo, after the lab is up, run (once): `task gitea:create-repo` then
-  # `task gitea:ship`. Its pipeline provisions the floci cloud (Terragrunt) and
-  # bootstraps Argo CD INSIDE its floci-EKS clusters — this platform never
-  # deploys the app; it only seeds gitops-apps (observability).
   kill "$pf" >/dev/null 2>&1 || true
   trap - RETURN
 }
@@ -244,11 +239,6 @@ setup_dns() {
   MGMT_IP="$(wait_lb_ip "$MGMT_CLUSTER")" || die "management ingress never got a LoadBalancer IP"
   log "ingress IPs  mgmt=$MGMT_IP  eks-dev=$EKS_DEV_IP  eks-prod=$EKS_PROD_IP"
 
-  # KIND serves ONLY Gitea (MGMT_IP). Everything else — Argo CD, the GitOps UI,
-  # AND observability (Grafana) — runs on the app's floci-EKS clusters and
-  # resolves to their own ingress IPs (EKS_DEV_IP/EKS_PROD_IP, pinned by the
-  # platform's eks:bootstrap-net). The app owns its OWN hostname (todo-app.*.local)
-  # — see the app repo's `task eks:hosts`.
   declare -A HOSTS=(
     [gitea.dev.local]="$MGMT_IP"
     [grafana.dev.local]="$EKS_DEV_IP"
@@ -300,10 +290,6 @@ setup_dns_hosts() {
 
 output() {
   step "Management plane ready (kind / Gitea)"
-  # This is the KUBERNETES half only. `task install` still has to provision the
-  # Gitea runner and bootstrap the floci-EKS clusters (Argo CD + observability)
-  # — it prints the final "lab is UP" banner once those finish. Don't claim the
-  # whole lab here, or the banner fires before the EKS bootstrap has run.
   cat <<EOF
 
   Gitea   http://gitea.dev.local   ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
@@ -312,10 +298,6 @@ output() {
 EOF
 }
 
-# install.sh is the KUBERNETES half of the lab — applied (helm/kubectl) by
-# `task install` AFTER Terragrunt has provisioned the infra (floci + the kind
-# management cluster). The Gitea Actions runner is also Terraform-managed and is
-# created by `task install` on a second apply once Gitea hands out a token.
 main() {
   log "Starting GitOps Enterprise Lab install (Kubernetes layer)"
   check_deps
@@ -332,9 +314,6 @@ main() {
   output
 }
 
-# SYNC_ONLY re-pushes gitops-apps (the observability stack) to Gitea WITHOUT
-# rebuilding the lab, so platform edits reconcile through the in-EKS Argo without
-# a full reinstall. Backs `task gitea:ship`. Requires the lab to already be running.
 if [ "${SYNC_ONLY:-false}" = "true" ]; then
   log "SYNC_ONLY=true — re-pushing GitOps repos to Gitea (no cluster/Argo rebuild)"
   detect_network

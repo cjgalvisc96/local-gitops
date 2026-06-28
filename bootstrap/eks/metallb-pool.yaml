@@ -1,5 +1,3 @@
-# MetalLB single-IP pool + L2 advertisement for a floci-EKS cluster.
-# __EKS_LB_IP__ is rendered per env by `task eks:bootstrap-net` (dev .230 / prod .240).
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:

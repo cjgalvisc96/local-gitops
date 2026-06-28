@@ -2,23 +2,20 @@
 
 ```
 .
-├── install.sh            bootstrap the whole lab (the only imperative surface)
-├── prune.sh              exact inverse of install.sh
+├── Taskfile.yml          workflow entry points (task install, eks:*, validate, …)
+├── install.sh            management-cluster Kubernetes layer (Gitea + DNS)
+├── prune.sh              host cleanup (DNS, /etc/hosts, mise activation)
 ├── lib/common.sh         pinned versions, network derivation, shared helpers
 ├── mise.toml             pinned CLI toolchain (one source of truth)
-├── Taskfile.yml          workflow entry points (task install, validate, …)
-├── clusters/             kind cluster definitions (management, dev, prod)
-├── bootstrap/            imperative install assets
-│   ├── argocd/           Argo CD params, RBAC, ingresses, root apps (dev/prod)
+├── infra/                infrastructure as code (Terraform/Terragrunt)
+│   ├── terraform/lab/    floci + kind management + 2 floci-EKS clusters + runner
+│   └── terragrunt/lab/   Terragrunt wrapper (local state under the repo)
+├── bootstrap/            imperative install assets (committed manifests)
+│   ├── eks/              per-EKS Argo CD: appprojects, ingress, MetalLB pool, observability app
 │   ├── gitea/            Gitea values, ingress, pinned LoadBalancer, runner config
-│   ├── ingress-nginx/    ingress-nginx values
-│   └── dns/              local DNS wiring
-├── platform-config/      GitOps control repo (app-of-apps)
-│   └── envs/
-│       ├── dev/          AppProject + one Application per stack (dev)
-│       └── prod/         AppProject + one Application per stack (prod)
+│   └── ingress-nginx/    ingress-nginx values
 ├── gitops-apps/          Kustomize manifests Argo CD reconciles
-│   ├── platform/         namespaces, ConfigMap, RBAC, SecretStore
+│   ├── platform/         namespaces, ConfigMap, RBAC, ClusterSecretStore
 │   └── observability/    OTel collector/agent, Prometheus, Loki, Tempo, Grafana
 └── docs/                 this documentation (MkDocs)
 ```

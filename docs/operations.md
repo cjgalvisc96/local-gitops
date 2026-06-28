@@ -8,18 +8,19 @@ everything.
 | Task | Does |
 |------|------|
 | `task tools` | install the pinned CLI toolchain via mise |
-| `task install` | build the full lab (app-agnostic — no specific app) |
-| `task install:app` | build the lab and keep an app's Argo Applications in `platform-config` (`DEPLOY_APP=true`) |
-| `task gitea:ship` | re-push `platform-config` + `gitops-apps` so Argo reconciles platform edits (no reinstall) |
-| `task prune` | tear down clusters, floci, DNS and Docker artifacts |
+| `task install` | build the full lab — infra (Terraform/Terragrunt) + Gitea + per-EKS Argo CD + observability (app-agnostic) |
+| `task eks:bootstrap ENV=<env>` | (re)bootstrap a floci-EKS cluster: MetalLB + ingress-nginx + Argo CD + observability |
+| `task gitea:ship` | re-push `gitops-apps` so the in-EKS Argo reconciles platform edits (no reinstall) |
+| `task prune` | Terragrunt destroy (runner + kind + floci-EKS + floci) then host cleanup |
 | `task prune:all` | the above and uninstall the mise-managed tools |
 
-`install.sh` always starts the **Gitea Actions runner** (the lab's CI/CD); `prune`
-removes it. The platform installs app-agnostic — **apps onboard themselves** into
-the running lab (the todo-app uses its `gitea:create-repo` / `argo:add-gitea-repo`
-/ `gitea:ship` tasks; see [Launch](launch.md)). `DEPLOY_APP=true` only seeds an
-app's floci state and keeps its Applications at bootstrap. The app's own pipelines
-drive build/deploy/promote — see [CI/CD](cicd.md).
+`task install` provisions the infra (floci, the kind management cluster, the two
+floci-EKS clusters and — on a second apply — the **Gitea Actions runner**), then
+brings up Argo CD and observability on both workload clusters; `task prune`
+(Terragrunt destroy) removes it all. The platform installs app-agnostic — **apps
+onboard themselves** into the running lab (the todo-app uses its
+`gitea:create-repo` / `gitea:ship` tasks; see [Launch](launch.md)). The app's own
+pipelines drive build/deploy/promote — see [CI/CD](cicd.md).
 
 ## Validation
 
@@ -35,13 +36,13 @@ Always validate before pushing — a change that doesn't render isn't done.
 
 | Task | Does |
 |------|------|
-| `task k8s:status` | clusters + Argo application health (dev, prod) |
-| `task k8s:pods` | pods across all clusters (`ENV=dev` to scope) |
-| `task k8s:apps` | Argo applications for `ENV` (default dev) |
-| `task k8s:sync ENV=dev` | hard-refresh + sync every Argo app in `ENV` |
-| `task k8s:trivy ENV=dev` | Trivy scan a cluster, or `IMG=<image>` for one image |
-| `task argo:password` | print the Argo CD admin password per workload cluster |
-| `task argo:repos` | show the Gitea repos Argo CD is linked to (`ENV=dev`) |
+| `task k8s:status` | kind clusters + the floci-EKS Argo application health (`ENV=dev`) |
+| `task k8s:pods` | pods on the floci-EKS cluster (`ENV=dev`) |
+| `task k8s:apps` | Argo applications on the floci-EKS cluster (`ENV=dev`) |
+| `task k8s:sync ENV=dev` | hard-refresh + sync every Argo app on the floci-EKS cluster |
+| `task k8s:trivy ENV=dev` | Trivy scan a floci-EKS cluster, or `IMG=<image>` for one image |
+| `task argo:password ENV=dev` | print the in-EKS Argo CD admin login (per-cluster, random) |
+| `task argo:repos ENV=dev` | show the Gitea repos the in-EKS Argo CD is linked to |
 
 ## DNS
 

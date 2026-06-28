@@ -1,12 +1,9 @@
 version: '3'
 
 vars:
-  # KIND = management only (Gitea). Argo CD + app + observability run on EKS.
   CLUSTERS: management
   ENV: '{{.ENV | default "dev"}}'
   MKDOCS: uvx --with mkdocs-material==9.7.6 --from mkdocs==1.6.1 mkdocs
-  # Gitea coordinates (match lib/common.sh) — the in-cluster Git LB the EKS Argo
-  # pulls gitops-apps (observability) from.
   GITEA_INCLUSTER_URL: '{{.GITEA_INCLUSTER_URL | default "http://172.18.255.209:3000"}}'
   GITEA_ORG: '{{.GITEA_ORG | default "gitops"}}'
   GITEA_ADMIN_USER: '{{.GITEA_ADMIN_USER | default "adminlocal"}}'
@@ -25,23 +22,14 @@ tasks:
       - mise install
       - mise reshim
 
-  # Build the lab in two layers:
-  #   INFRA (Terraform/Terragrunt): the floci container + the kind management
-  #     cluster + the Gitea Actions runner container.
-  #   KUBERNETES (declarative helm/kubectl, ./install.sh): MetalLB, ingress-nginx,
-  #     Gitea, its ingress/LB + the gitops-apps seed, DNS.
   # The runner needs a token from the running Gitea, so it is created on a SECOND
   # Terragrunt apply after the Kubernetes layer is up.
   install:
     desc: 'Build the full lab — Terraform infra (floci + kind + floci-EKS) + the Kubernetes layer (helm/kubectl) + Gitea runner + the per-EKS GitOps stack (Argo + observability)'
     cmds:
-      # 1) INFRA (Terragrunt): floci container + kind management cluster +
-      #    the floci-EKS (k3s) workload clusters (dev + prod).
       - bash -c 'cd "$(git rev-parse --show-toplevel)/infra/terragrunt/lab" && terragrunt apply -auto-approve -input=false'
       - kind export kubeconfig --name management
-      # 2) KUBERNETES layer (declarative helm/kubectl) + Gitea seed.
       - ./install.sh
-      # 3) RUNNER (Terraform): fetch a Gitea token, then a second apply creates it.
       - |
         set -e
         root="$(git rev-parse --show-toplevel)"
@@ -49,13 +37,9 @@ tasks:
         token=$(kubectl --context kind-management -n gitea exec "$pod" -c gitea -- gitea actions generate-runner-token | tr -d '\r\n')
         ( cd "$root/infra/terragrunt/lab" && TF_VAR_runner_token="$token" terragrunt apply -auto-approve -input=false )
         echo "✅ infra ready — Gitea Actions runner provisioned"
-      # 4) Per-EKS GitOps stack: MetalLB + ingress-nginx + Argo CD + observability
-      #    INTO each floci-EKS cluster, so argo.<env>.local + grafana.<env>.local
-      #    work standalone — before any app deploys. No APP_DIR = no app yet.
       - for: [dev, prod]
         task: eks:bootstrap
         vars: { ENV: "{{.ITEM}}" }
-      # 5) Final banner — printed only now, after EVERYTHING is up.
       - |
         cat <<'EOF'
 
@@ -78,8 +62,6 @@ tasks:
     cmds:
       - SYNC_ONLY=true ./install.sh
 
-  # Tear down both layers: Terragrunt destroys the runner + kind cluster + floci;
-  # prune.sh mops up host state (DNS block, kube contexts, floci helper containers).
   prune:
     desc: 'Tear down the lab — Terragrunt destroy (runner + kind + floci) then host cleanup'
     cmds:
@@ -115,8 +97,6 @@ tasks:
       - bash -n install.sh prune.sh lib/common.sh
       - 'command -v shellcheck >/dev/null && shellcheck -x install.sh prune.sh lib/common.sh || echo "(shellcheck not installed; skipped)"'
 
-  # Argo CD now lives on the floci-EKS clusters. These inspection tasks read the
-  # EKS kubeconfig the app writes (task eks:kubeconfig ENV=<env>).
   k8s:status:
     desc: Show the management cluster + the EKS Argo CD application health (ENV=dev)
     cmds:
@@ -176,15 +156,6 @@ tasks:
     cmds:
       - KUBECONFIG="/tmp/floci-eks-{{.ENV}}.kubeconfig" kubectl -n argocd get secret -l argocd.argoproj.io/secret-type=repository
 
-  # --- floci-EKS cluster bootstrap (PLATFORM-owned) ------------------------
-  # The platform bootstraps the app's floci-EKS (k3s) cluster end-to-end:
-  # MetalLB + ingress-nginx (network) + Argo CD (control plane) + the Argo
-  # Applications. The APP repo owns only its deployable content — the Helm
-  # chart, its Argo Application manifests, and its own Grafana dashboards — and
-  # its CD pipeline calls eks:bootstrap here, passing APP_DIR (its checkout) so
-  # we can apply its Application manifests. The app still creates the cluster
-  # itself (Terragrunt).
-  #
   # LB IPs sit OUTSIDE the kind MetalLB pools (mgmt .200-.209) to avoid L2
   # collisions: dev EKS = .230, prod EKS = .240.
   eks:bootstrap:
@@ -194,16 +165,12 @@ tasks:
       APP_DIR: '{{.APP_DIR | default ""}}'
       APP_REPO_NAME: '{{.APP_REPO_NAME | default "modular-monolithic-app"}}'
     cmds:
-      # 1) kubeconfig for the target EKS cluster.
       - task: eks:kubeconfig
         vars: { ENV: "{{.ENV}}", APP_PROJECT: "{{.APP_PROJECT}}" }
-      # 2) Cluster network: MetalLB + ingress-nginx + kind-net.
       - task: eks:bootstrap-net
         vars: { ENV: "{{.ENV}}", APP_PROJECT: "{{.APP_PROJECT}}" }
-      # 3) GitOps control plane: Argo CD + AppProjects + observability.
       - task: eks:install-argo
         vars: { ENV: "{{.ENV}}" }
-      # 4) Applications: app repo credential + the app's Argo Applications.
       - task: eks:register-app
         vars: { ENV: "{{.ENV}}", APP_PROJECT: "{{.APP_PROJECT}}", APP_DIR: "{{.APP_DIR}}", APP_REPO_NAME: "{{.APP_REPO_NAME}}" }
 
@@ -242,17 +209,13 @@ tasks:
         # The k3s container must sit on the shared `kind` network so MetalLB can
         # L2-advertise {{.EKS_LB_IP}} where the host (and kind) can reach it.
         docker network connect kind "{{.K3S}}" 2>/dev/null || true
-        # 1) MetalLB (floci k3s ships no servicelb, so no klipper conflict).
         kubectl apply -f "https://raw.githubusercontent.com/metallb/metallb/{{.METALLB_VERSION}}/config/manifests/metallb-native.yaml" >/dev/null
         kubectl -n metallb-system rollout status deploy/controller --timeout=180s
         kubectl -n metallb-system rollout status daemonset/speaker --timeout=180s
-        # 2) Single-IP pool + L2 advertisement (declarative manifest, env IP
-        #    rendered in; retry while the validating webhook comes up).
         for i in $(seq 1 10); do
           sed "s|__EKS_LB_IP__|{{.EKS_LB_IP}}|g" bootstrap/eks/metallb-pool.yaml \
             | kubectl apply -f - >/dev/null 2>&1 && break || sleep 6
         done
-        # 3) ingress-nginx (cloud manifest -> a LoadBalancer svc MetalLB fills).
         kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/{{.INGRESS_NGINX_REF}}/deploy/static/provider/cloud/deploy.yaml" >/dev/null
         kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=240s
         kubectl -n ingress-nginx patch svc ingress-nginx-controller \
@@ -274,8 +237,6 @@ tasks:
         vars: { ENV: "{{.ENV}}", APP_PROJECT: "{{.APP_PROJECT}}" }
       - |
         set -euo pipefail
-        # Platform-only bootstrap (task install) passes no APP_DIR — there is no
-        # app to register yet, so skip. The app's CD passes APP_DIR=its checkout.
         if [ -z "{{.APP_DIR}}" ]; then
           echo "no APP_DIR — platform-only bootstrap, skipping app registration"
           exit 0
@@ -285,7 +246,6 @@ tasks:
         export KUBECONFIG="/tmp/floci-eks-{{.ENV}}.kubeconfig"
         kubectl -n argocd get deploy argocd-server >/dev/null 2>&1 \
           || { echo "Argo CD not installed — eks:install-argo must run first" >&2; exit 1; }
-        # Gitea repo credential so the in-EKS Argo can read the app repo.
         kubectl apply -f - <<EOF >/dev/null
         apiVersion: v1
         kind: Secret
@@ -301,15 +261,11 @@ tasks:
           username: {{.GITEA_ADMIN_USER}}
           password: {{.GITEA_ADMIN_PASSWORD}}
         EOF
-        # The app's Applications (deps wave 1, app wave 2) — in-cluster dest.
         kubectl apply \
           -f "{{.APP_DIR}}/infra/k8s/gitops/applications/dependencies-{{.ENV}}.yaml" \
           -f "{{.APP_DIR}}/infra/k8s/gitops/applications/todo-app-{{.ENV}}.yaml" >/dev/null
         echo "registered {{.APP_REPO_NAME}} Applications with the in-EKS Argo (ENV={{.ENV}})"
 
-  # Installs Argo CD (the deployer) + the argo.<env>.local ingress + the
-  # AppProjects (governance) + the observability stack INTO a floci-EKS cluster.
-  # Called by eks:bootstrap (step 3); needs a kubeconfig for the target cluster.
   eks:install-argo:
     desc: 'Install Argo CD (GitOps control plane) into a floci-EKS cluster (ENV=dev|prod) + argo.<env>.local ingress + AppProjects'
     vars:
@@ -320,21 +276,15 @@ tasks:
         KCFG="{{.KUBECONFIG}}"; [ -n "$KCFG" ] || KCFG="/tmp/floci-eks-{{.ENV}}.kubeconfig"
         [ -f "$KCFG" ] || { echo "kubeconfig $KCFG not found — the app pipeline writes it (task eks:kubeconfig)" >&2; exit 1; }
         export KUBECONFIG="$KCFG"
-        # 1) Install Argo CD (idempotent).
         kubectl get ns argocd >/dev/null 2>&1 || kubectl create namespace argocd
         kubectl apply -n argocd -f "https://raw.githubusercontent.com/argoproj/argo-cd/{{.ARGOCD_VERSION}}/manifests/install.yaml" >/dev/null
         kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
         kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=180s
-        # 2) Serve the UI as plain HTTP behind the ingress (local only).
         kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{"data":{"server.insecure":"true"}}' >/dev/null
         kubectl -n argocd rollout restart deploy/argocd-server >/dev/null
         kubectl -n argocd rollout status deploy/argocd-server --timeout=120s
-        # 3) argo.<env>.local ingress + permissive AppProjects (declarative).
         sed "s|__ENV__|{{.ENV}}|g" bootstrap/eks/argocd-ingress.yaml | kubectl apply -f - >/dev/null
         kubectl apply -f bootstrap/eks/appprojects.yaml >/dev/null
-        # 4) Gitea repo credential for the PLATFORM repo (gitops-apps), so this
-        #    Argo can sync the observability stack — a Secret with creds, so it is
-        #    rendered at runtime, never committed.
         kubectl apply -f - <<EOF >/dev/null
         apiVersion: v1
         kind: Secret
@@ -349,9 +299,6 @@ tasks:
           username: {{.GITEA_ADMIN_USER}}
           password: {{.GITEA_ADMIN_PASSWORD}}
         EOF
-        # 5) Observability Application — Grafana/Prometheus/Loki/Tempo/OTel run IN
-        #    this EKS cluster (grafana.<env>.local). Declarative manifest, env +
-        #    repo URL rendered in.
         sed -e "s|__ENV__|{{.ENV}}|g" \
             -e "s|__GITEA_REPO_URL__|{{.GITEA_INCLUSTER_URL}}/{{.GITEA_ORG}}/gitops-apps.git|g" \
             bootstrap/eks/observability-app.yaml | kubectl apply -f - >/dev/null

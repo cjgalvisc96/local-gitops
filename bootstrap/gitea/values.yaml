@@ -29,9 +29,7 @@ gitea:
 persistence:
   enabled: false
 
-# Chart 12.x bundles HA Postgres + Valkey ON by default; keep them OFF — this
-# lab Gitea uses ephemeral sqlite + no cache (single replica). (Chart 12 renamed
-# the cache subcharts redis-cluster/redis -> valkey-cluster/valkey.)
+# Chart 12.x bundles HA Postgres + Valkey ON by default; keep them OFF (ephemeral sqlite, single replica).
 postgresql-ha:
   enabled: false
 postgresql:

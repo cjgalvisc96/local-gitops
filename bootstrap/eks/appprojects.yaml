@@ -1,6 +1,3 @@
-# Permissive Argo AppProjects — governance lives with the platform. App
-# Applications reference project: dev / prod. Applied to every floci-EKS cluster
-# (static; no per-env rendering).
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
