@@ -1,442 +1,338 @@
-# Enterprise Readiness Plan — `local-gitops` (Full-Local Edition)
+# Enterprise Readiness Plan — `local-gitops` Platform (AWS Production)
 
-**Goal:** run the *entire* enterprise hardening stack with **zero cloud
-dependencies**, on a single workstation, using **Keycloak** as the identity
-provider. Every "cloud" item is replaced by an in-cluster open-source
-equivalent and wired into the repo's existing app-of-apps GitOps model.
+**Goal:** take this platform from the local lab it is today to a hardened
+**production deployment on a real AWS account**. The target is full enterprise
+AWS: managed **EKS**, **Cognito** identity, **Secrets Manager/KMS**, **ECR**
+supply chain, **CloudFront + WAF + ACM** edge, the **CloudTrail/Config/Security
+Hub/GuardDuty** security baseline, **Aurora + ElastiCache** data, **CloudWatch +
+SNS/SES** observability, a **multi-AZ VPC**, and **Organizations/SCP** governance.
 
-Hardware assumption: ~128 GB RAM available, so nothing here is trimmed for
-footprint. Expect the full stack to consume ~40–70 GB RAM across the three
-clusters when everything is running.
+`local-gitops` owns the clusters + GitOps control plane + observability; the app
+(`modular-monolithic-app`, separate repo) deploys onto it. In production that
+control plane runs on EKS; **floci/LocalStack is only the local inner-loop
+emulator** for fast dev/CI (see §1). Everything in §2 onward describes the
+**real-AWS production design** — no emulator limits apply.
 
-> **Reconciled against repo @ `0d7f67e` (2026-06-21).** See the delta note below.
-
----
-
-## Δ Repo delta since last revision (what's already moved)
-
-The repo has advanced on the **observability** and **developer-experience**
-fronts. This plan is updated accordingly — those items are now marked *partially
-done* rather than *to add*.
-
-**Now present in the repo (good — credit where due):**
-- **Logs:** `loki.yaml` + an **otel-agent** `DaemonSet` (`otel-agent.yaml`)
-  tailing `/var/log/pods/*` and shipping to Loki via OTLP.
-- **Traces:** `tempo.yaml` (OTLP receivers on 4317/4318).
-- **Metrics breadth:** `kube-state-metrics.yaml` added alongside Prometheus.
-- **Grafana wiring:** Loki **and** Tempo are now provisioned as datasources in
-  `grafana.yaml` (with a logs panel) — the three-pillar correlation is in place.
-- **Toolchain pinned:** `mise.toml` pins `kubectl/kind/helm/k9s/argocd/kustomize/
-  awscli/task` **and `trivy`** — i.e. the supply-chain scanner is already on the
-  bench. `Taskfile.yml` wraps `install`/`install:app`/etc. as `task` targets.
-
-**Still exactly as before (this plan's core remains valid):**
-- Argo still runs `server.insecure: "true"`; everything is plain HTTP.
-- `secretstore.yaml` still uses the floci `aws`/ParameterStore provider with
-  `test/test`; no Vault.
-- Grafana still `admin/admin` with **anonymous Viewer enabled**.
-- The new Loki/Tempo/otel-agent all use **`emptyDir`** (Loki retention 24h,
-  Tempo 1h) — observability data is still ephemeral.
-- No cert-manager / Keycloak / Vault / Harbor / MinIO / Cilium / Kyverno yet.
-
-Net effect on the plan: **§10 (observability) drops from "build it" to "make it
-durable + add alerting + long-term storage,"** and **§6 (supply chain) gets a
-head start** because `trivy` is already pinned. Everything else is unchanged.
+> **Reconciled against the current repo.** Real paths are referenced throughout
+> (`bootstrap/eks/*`, `gitops-apps/**`, `infra/terraform/lab/*`, `Taskfile.yml`,
+> `install.sh`, `lib/common.sh`). The secrets path (External Secrets Operator in
+> `gitops-apps/platform/base/secretstore.yaml`) is already AWS-shaped.
 
 ---
 
-## 0. What stays, what's added
+## 0. From lab to production — what changes
 
-The existing architecture is kept verbatim: three `kind` clusters
-(`management`, `dev`, `prod`), per-env Argo CD, Gitea on management, MetalLB
-(`172.18.255.200–229` split by env), ingress-nginx, ESO, automated dnsmasq
-split-DNS for `*.dev.local` / `*.prod.local`, and now an OTel→Prometheus/Loki/
-Tempo→Grafana observability stack in dev/prod.
+Today `task install` builds, via Terraform/Terragrunt (`infra/terragrunt/lab` →
+`infra/terraform/lab`): a floci container (LocalStack `:4566`, `test/test`), a
+kind `management` cluster (Gitea only), two k3s "EKS" clusters
+(`floci-eks-todo-app-dev` `:6443` / `-prod` `:6444`) on the kind docker network,
+and the Gitea Actions runner. `./install.sh` adds MetalLB + ingress-nginx +
+Gitea + split-DNS; per-EKS, `task eks:bootstrap ENV=dev|prod` installs MetalLB +
+ingress-nginx + Argo CD + the observability Argo `Application`
+(`bootstrap/eks/observability-app.yaml`). In-cluster state is committed
+manifests (`bootstrap/eks/*` via kubectl + `gitops-apps/observability/*` via
+kustomize), currently all `emptyDir`.
 
-New platform components and where they run:
+**The production deltas:**
 
-| Component | Role | Cluster(s) | Host | Status |
-|-----------|------|-----------|------|--------|
-| **cert-manager + trust-manager** | private CA, issue TLS, distribute CA bundle | all 3 | — | to add |
-| **Keycloak** | OIDC IdP (SSO for everything) | management | `keycloak.dev.local` | to add |
-| **Vault** | real secrets backend (replaces floci as canonical) | management | `vault.dev.local` | to add |
-| **Harbor** | private registry + Trivy scanning + cosign | management | `harbor.dev.local` | to add |
-| **MinIO** | S3-compatible store (Velero/Loki/Tempo/Thanos backend) | management | `minio.dev.local` | to add |
-| **Cilium** | CNI with NetworkPolicy + Hubble (replaces kindnet) | all 3 | `hubble.dev.local` | to add |
-| **Kyverno** | policy admission + image verification | dev, prod | — | to add |
-| **Loki / Tempo** | logs / traces | dev, prod | — | **present (ephemeral)** |
-| **kube-state-metrics** | cluster object metrics | dev, prod | — | **present** |
-| **Alertmanager / Thanos** | alerts / long-term metrics | dev, prod | `*.{dev,prod}.local` | to add |
-| **Mailpit** | local SMTP sink for Alertmanager/Keycloak email | management | `mail.dev.local` | to add |
-| **Velero** | backup/restore to MinIO | all 3 | — | to add |
-| **Argo Rollouts** | progressive delivery (canary/blue-green) | dev, prod | — | to add |
-| **OpenCost** | cost visibility | dev, prod | `cost.{dev,prod}.local` | to add |
+- The k3s "EKS" containers become **real Amazon EKS** clusters (managed node
+  groups / Fargate) in a **multi-AZ VPC**. MetalLB → **AWS Load Balancer
+  Controller** (ALB/NLB). Local-path PVCs → **EBS/EFS CSI**.
+- floci endpoints (`http://floci:4566`, `test/test`) → **real AWS APIs via
+  IRSA** — no static keys.
+- Gitea/Argo stay as the GitOps control plane but front with **ACM + CloudFront
+  + WAF + Route53**, not split-DNS + plain HTTP.
+- The same `gitops-apps/**` kustomize tree and `bootstrap/eks/*` manifests
+  deploy unchanged in shape; only endpoints, IAM, and storage backends differ.
 
-`floci` is retained but demoted: keep it as an optional "this is how it looks
-against AWS SSM/ECR" demo path. The **canonical** secrets backend becomes Vault
-and the **canonical** registry becomes Harbor.
-
----
-
-## 1. The two things everything else depends on
-
-Build these first, in this exact order — every later step trusts them.
-
-### 1.1 Private CA + trust distribution (cert-manager + trust-manager)
-This is the backbone. OIDC, mTLS, and registry pulls all fail until the CA is
-trusted everywhere.
-
-1. Install **cert-manager** in all three clusters (GitOps `Application`,
-   sync-wave very early, e.g. `-10`).
-2. Generate one **root CA** (a self-signed `ClusterIssuer` bootstraps an
-   intermediate CA `Certificate`, which becomes the real `ClusterIssuer`).
-3. Install **trust-manager** and create a `Bundle` that publishes the root CA
-   public cert as a ConfigMap into every namespace.
-4. Add the root CA to the **host browser trust store** so `https://*.dev.local`
-   is green locally.
-5. Add the root CA to the **kind node trust stores** (see §3.4) so the
-   apiserver can validate Keycloak for OIDC.
-
-Sketch — CA issuer:
-```yaml
-# gitops-apps/platform/base/ca-issuer.yaml
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata: { name: selfsigned-root }
-spec: { selfSigned: {} }
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata: { name: gitops-root-ca, namespace: cert-manager }
-spec:
-  isCA: true
-  commonName: gitops-local-root
-  secretName: gitops-root-ca
-  issuerRef: { name: selfsigned-root, kind: ClusterIssuer }
----
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata: { name: gitops-ca }      # <-- every Ingress references this
-spec: { ca: { secretName: gitops-root-ca } }
-```
-
-### 1.2 Keycloak (SSO for the whole platform)
-Runs on the management cluster (identity is control-plane infra, like Gitea).
-
-- Deploy via the Keycloak Operator or Bitnami chart as a GitOps `Application`,
-  exposed at `https://keycloak.dev.local` with a cert-manager cert (SAN must be
-  `keycloak.dev.local` — this exact match matters for the K8s apiserver later).
-- Back it with a persistent Postgres (CNPG, §8).
-- Create one realm `gitops` with these OIDC clients:
-  `argocd-dev`, `argocd-prod`, `grafana-dev`, `grafana-prod`, `gitea`,
-  `kubernetes` (public, for kubectl/apiserver).
-- Create groups matching the repo's existing Argo RBAC: `platform-admins`,
-  `dev-users`, `prod-users`. These map straight onto
-  `bootstrap/argocd/argocd-rbac.yaml` (`role:admin`, `role:dev`, `role:prod`).
-- Point Keycloak SMTP at **Mailpit** so emails are catchable locally.
-
-Once §1.1 and §1.2 are green, everything else is incremental.
+The new infra is a **production Terragrunt stack** (`infra/terragrunt/prod/…`,
+`infra/terraform/<module>/…`) alongside the existing `lab/` stack — VPC, EKS,
+RDS, ElastiCache, Cognito, ECR, CloudFront/WAF, and the security baseline as
+Terraform modules.
 
 ---
 
-## 2. TLS everywhere (replaces all plain HTTP)
+## 1. Local development (floci) — the inner loop only
 
-Flip the repo's HTTP shortcuts:
+floci/LocalStack is the **local dev/CI emulator**, not the deployment target. It
+exists so a developer (and CI) can exercise the AWS-shaped wiring on a laptop
+without an AWS account.
 
-- **Remove** `server.insecure: "true"` from
-  `bootstrap/argocd/argocd-cmd-params.yaml`.
-- Every Ingress (`bootstrap/gitea/ingress.yaml`,
-  `bootstrap/argocd/ingress-*.yaml`,
-  `gitops-apps/observability/overlays/*/ingress.yaml`): add a `tls:` block, the
-  `cert-manager.io/cluster-issuer: gitops-ca` annotation, and switch
-  `ssl-redirect` to `"true"`.
-- Gitea: set `ROOT_URL: https://gitea.dev.local/`; register the repo in Argo
-  with the CA bundle so cross-cluster clones over HTTPS validate. (Keep the
-  pinned MetalLB IP `172.18.255.209` but front it with TLS, or switch Argo repo
-  creds to SSH.)
-- **East-west mTLS:** install **Linkerd** (lighter) or **Istio ambient** in
-  dev/prod and mesh the app/observability/platform namespaces. This encrypts
-  `http://prometheus:9090`, `http://loki:3100`, `http://tempo:3200`, DB
-  connections, and ESO→Vault traffic that is cleartext today.
+- Gated by **`var.floci = true`** in the Terraform lab stack
+  (`infra/terraform/lab/variables.tf`). When set, the stack provisions the floci
+  container and points workloads at `:4566` with `test/test`.
+- floci **gates off** the services LocalStack-community can't run —
+  **Cognito, WAF, GuardDuty, Config, Aurora, ElastiCache** — and substitutes:
+  - **dev-auth**: the app runs in DEBUG mode trusting an `x-dev-tenant` header
+    in place of the Cognito `tenant_id` claim;
+  - **in-cluster Postgres + Redis** in place of Aurora + ElastiCache;
+  - **self-signed issuer** in place of ACM/PCA.
+- It exercises for real (so the IaC is identical to prod minus the endpoint):
+  S3, ECR, Secrets Manager, SSM, KMS, SNS/SQS, EventBridge, CloudWatch,
+  IAM/STS.
 
----
-
-## 3. Identity wiring (Keycloak → each system)
-
-### 3.1 Argo CD
-In `argocd-cm` add `oidc.config` → `https://keycloak.dev.local/realms/gitops`,
-client `argocd-dev`/`argocd-prod`, mount the CA bundle. Map Keycloak groups →
-existing roles in `argocd-rbac-cm`:
-```
-g, platform-admins, role:admin
-g, dev-users,       role:dev
-g, prod-users,      role:prod
-```
-The `dev-user`/`prod-user` subjects that can't authenticate today become real,
-group-driven logins.
-
-### 3.2 Grafana
-Replace the hardcoded `admin/admin` + **anonymous** (still enabled in
-`grafana.yaml`) with:
-```
-GF_AUTH_ANONYMOUS_ENABLED=false
-GF_AUTH_GENERIC_OAUTH_ENABLED=true
-GF_AUTH_GENERIC_OAUTH_AUTH_URL/TOKEN_URL/API_URL=...keycloak.dev.local/realms/gitops...
-GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=  # map groups -> Admin/Editor/Viewer
-```
-Admin password comes from Vault (§4), not the manifest. (Datasources for
-Prometheus/Loki/Tempo are already provisioned — leave those as-is.)
-
-### 3.3 Gitea
-Add a Keycloak OAuth2 auth source (`gitea admin auth add-oauth`). Local admin
-stays as break-glass only.
-
-### 3.4 Kubernetes API server (advanced — the one fiddly step)
-Optional: app-level SSO (3.1–3.3) gives the full demo; apiserver OIDC adds
-`kubectl`-as-Keycloak-user. Requires `clusters/*.yaml` changes:
-- **Mount the root CA** into the control-plane node via `extraMounts`.
-- **Resolve `keycloak.dev.local`** from inside the node (hosts entry / point at
-  dnsmasq); issuer URL must be reachable and its cert SAN = `keycloak.dev.local`.
-- apiserver `extraArgs` via `kubeadmConfigPatches`:
-```yaml
-# clusters/dev.yaml (excerpt)
-kubeadmConfigPatches:
-  - |
-    kind: ClusterConfiguration
-    apiServer:
-      extraArgs:
-        oidc-issuer-url: https://keycloak.dev.local/realms/gitops
-        oidc-client-id: kubernetes
-        oidc-ca-file: /etc/kubernetes/pki/keycloak-ca.crt
-        oidc-username-claim: email
-        oidc-groups-claim: groups
-      extraVolumes:
-        - { name: kcca, hostPath: /etc/kubernetes/pki/keycloak-ca.crt, mountPath: /etc/kubernetes/pki/keycloak-ca.crt, readOnly: true, pathType: File }
-nodes:
-  - role: control-plane
-    extraMounts:
-      - { hostPath: ./.ca/root.crt, containerPath: /etc/kubernetes/pki/keycloak-ca.crt }
-```
-Bind groups to K8s RBAC (`ClusterRoleBinding` subject `kind: Group`).
-**Fallback:** a small **Dex** per cluster as an OIDC shim, or skip apiserver
-OIDC and keep group-based RBAC bound to ServiceAccounts.
+With `var.floci = false` the same modules target a real AWS account and every
+gated service comes online. **Everything from §2 onward is the real-AWS
+production design.**
 
 ---
 
-## 4. Secrets — out of Git, into Vault (local IAM)
+## 2. Foundation — VPC, IAM/IRSA, KMS, EKS
 
-### 4.1 Stand up Vault (management cluster)
-- Deploy Vault as a GitOps `Application` at `https://vault.dev.local`, persistent
-  storage, unseal via transit or manual for the lab.
-- Enable **KV v2** and seed the values currently hardcoded (Gitea admin, Grafana
-  admin, Postgres `todo/todo`, app DB creds).
-- Enable **Kubernetes auth**, one role per cluster — the local equivalent of
-  cloud workload identity (IRSA). ServiceAccount tokens authenticate; **no
-  static keys**.
+Build the account and cluster baseline first; everything else trusts it.
 
-### 4.2 Repoint ESO
-The repo already runs ESO + a `ClusterSecretStore`
-(`gitops-apps/platform/base/secretstore.yaml`, still floci/`aws`/ParameterStore).
-Change the provider to **Vault** using Kubernetes auth. The static
-`floci-aws-creds` (`test/test`) secret goes away.
+### 2.1 Network — multi-AZ VPC
+- **VPC across ≥3 AZs**: public subnets (ALB/NAT only), **private subnets** for
+  nodes and data, isolated subnets for RDS/ElastiCache.
+- **NAT gateways** per AZ; **VPC Flow Logs** to CloudWatch/S3.
+- **PrivateLink / VPC endpoints** for S3, ECR (api+dkr), Secrets Manager, SSM,
+  KMS, STS, CloudWatch — keep AWS API traffic off the internet.
+- **Security Groups** as the L3/L4 boundary; **NetworkPolicy** (Cilium or
+  Calico) for pod-level east-west control inside the cluster.
 
-### 4.3 Kill plaintext-in-Git
-- Remove credentials from `lib/common.sh`, `grafana.yaml`, `postgres.yaml`.
-- For bootstrap secrets that must live in Git, encrypt with **SOPS + age**
-  (local keypair, no KMS) or **Sealed Secrets**.
-- Generate Gitea/Grafana/Postgres admin creds at install time straight into
-  Vault; print nothing sensitive to stdout.
+### 2.2 IAM + IRSA
+- **One scoped IAM role per workload**, bound via **IRSA** (EKS OIDC provider):
+  `api` pod, `ai` pod (`bedrock:InvokeModel` on specific model ARNs), DB-init
+  Job (DDL + secret read, no data access), EventBridge publisher (publish-only),
+  `external-secrets` (read Secrets Manager/SSM + `kms:Decrypt`),
+  AWS LB Controller, EBS/EFS CSI, cluster-autoscaler. **No shared or
+  account-wide role.**
+- **IAM Access Analyzer** on; permissions boundaries on human roles.
 
----
+### 2.3 KMS
+- **Customer-managed CMKs** per trust boundary (secrets, RDS, EBS, S3, logs)
+  with **automatic rotation** and tight key policies. Envelope-encrypt
+  everything; no AWS-managed default keys for regulated data.
 
-## 5. Policy, Pod Security & Network
-
-### 5.1 Kyverno (dev, prod)
-GitOps `Application`. Start `Audit`, then `Enforce`: disallow `:latest`, require
-requests/limits, require non-root + drop ALL caps + readOnlyRootFilesystem,
-require images from `harbor.dev.local`, `verifyImages` against the cosign key
-(§6), forbid `emptyDir` for stateful workloads — **including Loki/Tempo once
-they're on PVCs (§8)**.
-
-### 5.2 Pod Security Admission
-Label namespaces in `gitops-apps/platform/base/namespaces.yaml`
-`pod-security.kubernetes.io/enforce: restricted`. Add `securityContext` to
-Grafana, Postgres, Keycloak, Loki, Tempo, otel-agent, etc.
-
-### 5.3 NetworkPolicies via Cilium
-Recreate clusters with `disableDefaultCNI: true` and install **Cilium**
-(bootstrap imperatively right after cluster-create, like MetalLB). Then:
-default-deny per namespace; allow ingress→app, app→postgres/redis, observability
-scraping (incl. otel-agent→Loki, app→Tempo), ESO→Vault, registry pulls. **Hubble**
-UI at `hubble.dev.local`. Tighten the wildcard AppProjects (`*/*` in
-`platform-config/envs/*/project.yaml`). Re-enable ingress-nginx admission
-webhooks and **drop** `allow-snippet-annotations: "true"` in
-`bootstrap/ingress-nginx/values.yaml`.
+### 2.4 EKS
+- **Amazon EKS** per environment (dev/prod), **private API endpoint**, managed
+  node groups (and/or **Fargate** for system workloads), control-plane logging
+  to CloudWatch.
+- **Argo CD on EKS** as the GitOps engine (replaces the per-k3s Argo from
+  `task eks:install-argo`); the `bootstrap/eks/*` manifests and
+  `gitops-apps/**` overlays reconcile unchanged.
+- Add-ons via IRSA: **AWS Load Balancer Controller**, **EBS/EFS CSI**,
+  **external-dns** (Route53), **cluster-autoscaler/Karpenter**.
 
 ---
 
-## 6. Supply chain — Harbor + cosign (local)
+## 3. Identity — Amazon Cognito
 
-> Head start: **`trivy` is already pinned in `mise.toml`** — wire it into CI now.
-
-- **Harbor** on management at `https://harbor.dev.local` (built-in Trivy
-  scanning). Replaces the floci ECR path as canonical.
-- Change image flow (`install.sh` step 7 / `task install`): instead of
-  `docker build → kind load`, do `build → push to harbor.dev.local → cluster
-  pulls by digest`. Harbor pull creds via Vault/ESO.
-- **cosign**: sign images in CI; public key in Vault; Kyverno `verifyImages`
-  (§5.1) rejects unsigned/untrusted images at admission.
-- **SBOMs** (Syft) + fail CI on high/critical CVEs (Trivy/Grype — trivy already
-  available). Pin all images by digest; no floating tags (incl. replacing
-  `floci/floci:latest`).
-
----
-
-## 7. CI/CD & promotion (local)
-
-- **Gitea Actions** + an `act_runner`. On every PR to
-  `platform-config`/`gitops-apps`: `kustomize build` → `kubeconform` →
-  `conftest`(OPA) / `kyverno test` → diff preview. (`kustomize` and `trivy` are
-  pinned in `mise.toml`; reuse the same versions in CI.) This enforces the
-  existing `validate-manifests` skill / `task`-driven checks as a real gate.
-- Branch protection + CODEOWNERS on both GitOps repos.
-- **Argo Rollouts** in dev/prod for canary/blue-green with analysis (query
-  Prometheus) + auto-rollback.
-- Promotion DEV→PROD becomes a PR that bumps the **prod image digest** with a
-  required approver — replacing today's manual edits. Pin prod to a SHA, not
-  `HEAD`. (Consider adding `task promote ENV=prod` wrapping the existing
-  `/promote` skill.)
+- **Cognito user pool** per environment with **app clients** for the
+  application, Argo CD, and Grafana; **hosted UI** or OIDC federation to a
+  corporate IdP.
+- **Groups → roles** (`platform-admins`, `dev-users`, `prod-users`) surfaced as
+  a `cognito:groups` claim; the pool also emits the **`tenant_id`** claim that
+  drives tenancy.
+- **MFA enforced** + **advanced security** (compromised-credential and
+  adaptive-risk detection); short token lifetimes; refresh rotation.
+- Argo CD / Grafana use Cognito OIDC; group claims map to RBAC
+  (`gitops-apps/platform/base/rbac.yaml`, Argo `appprojects`/RBAC). Drop
+  anonymous Viewer in `gitops-apps/observability/base/grafana.yaml`.
+- **Tenancy stays RLS, not app-layer filtering:** Cognito `tenant_id` claim →
+  `get_request_context` → UoW `set_config('app.tenant_id', …, local)` →
+  PostgreSQL RLS. (Local dev substitutes the `x-dev-tenant` header for the
+  claim — §1.)
 
 ---
 
-## 8. Reliability, durability & HA (simulated locally)
+## 4. Secrets & config — Secrets Manager + SSM + KMS via ESO
 
-- Recreate `kind` clusters as **multi-node** to demonstrate anti-affinity,
-  PodDisruptionBudgets, HA scheduling. (Fault domains simulated — one host.)
-- **Persistent storage:** kind ships a local-path provisioner. Replace every
-  `emptyDir` / `persistence: false` with PVCs — now explicitly including the
-  **new observability components**: `loki.yaml`, `tempo.yaml`, and the
-  otel-agent file-storage are all `emptyDir` today, so logs/traces vanish on
-  restart. Also: Gitea, Postgres, Grafana, Keycloak, Vault, Harbor, MinIO,
-  Prometheus.
-- **Postgres:** **CloudNativePG** with replicas + PITR instead of the single
-  `emptyDir` Postgres in `gitops-apps/dependencies/base/postgres.yaml`.
-- **Gitea:** external CNPG Postgres + PVCs + ≥2 replicas (drop SQLite).
-- **Argo CD:** HA mode (redis-ha, multiple controllers).
+The repo already runs **External Secrets Operator** with the AWS provider
+(`gitops-apps/platform/base/secretstore.yaml`). Promote it to production:
 
-## 9. Backup & DR (Velero → MinIO)
-
-- **MinIO** on management as the S3 endpoint for everything.
-- **Velero** per cluster, backing up namespaces + PVs to MinIO on a schedule.
-- CNPG continuous backup + PITR to MinIO.
-- Rehearse restore after a deliberate wipe; track RPO/RTO. Back up the Vault
-  unseal keys and bootstrap secrets (Argo is reconstructable from Git).
-
-## 10. Observability — finish what's started (all local)
-
-The three pillars now exist in the repo (Prometheus + Loki + Tempo + otel
-collector/agent + kube-state-metrics, all surfaced in Grafana). What's left to
-make it production-shaped:
-
-- **Persistence (highest priority):** Loki (`emptyDir`, 24h), Tempo (`emptyDir`,
-  1h), and otel-agent file-storage are ephemeral — move to PVCs (§8) and
-  lengthen retention. For scale-out + long-term, back Loki/Tempo/Thanos with
-  **MinIO** (§9) instead of local filesystem.
-- **Alerting (missing entirely):** add **Alertmanager** + rules →
-  **Mailpit** (SMTP) or a webhook. Add SLO/burn-rate alerts and platform alerts:
-  Argo sync health, **cert expiry**, ESO/Vault failures, Kyverno denials, Loki
-  ingestion errors.
-- **Long-term metrics:** **Thanos** (or Mimir) on MinIO; persistent Prometheus.
-- **Mesh/exemplars:** once mTLS (§2) is in, enable trace exemplars so Grafana
-  jumps Prometheus → Tempo → Loki for a request. (Tempo OTLP is already on
-  4317/4318, so app instrumentation can point straight at it.)
-
-## 11. Multi-tenancy & governance
-
-- `ResourceQuota` + `LimitRange` per namespace (none today — and the new obs
-  components make this more pressing).
-- Per-team AppProjects with scoped repos/destinations.
-- **OpenCost** at `cost.{dev,prod}.local`.
-- API server + Argo audit logs shipped to **Loki** (already running).
+- Swap the static `floci-aws-creds` (`test/test`) for the `external-secrets`
+  **IRSA** role — the `ClusterSecretStore` spec is otherwise unchanged.
+- **Secrets Manager** for rotated credentials (DB users, API keys) with
+  **automatic rotation** (Lambda rotators for Aurora); **SSM Parameter Store**
+  for plain config. All **KMS-encrypted** (§2.3).
+- Purge every hardcoded credential from Git (Gitea/Grafana/DB); ESO materializes
+  them as K8s `Secret`s at runtime. Bootstrap-only secrets via **SOPS + KMS**.
 
 ---
 
-## 12. Phased install order (execute top to bottom)
+## 5. Supply chain — ECR + Trivy + cosign + SBOM
+
+`trivy` is already pinned (`mise.toml`); `task eks:trivy-scan` already scans.
+
+- **ECR** repositories with **scan-on-push** and **immutable tags**; lifecycle
+  policies; cross-account replication for prod if needed.
+- Image flow: **build → push to ECR → deploy by digest** (replaces
+  `docker build → k3s import`). Pull via IRSA/node role, no static creds.
+- **Trivy** (SBOM via Syft + CVE gate, fail high/critical) and **cosign**
+  signing in the Gitea Actions pipeline; **Kyverno `verifyImages`** (§7) rejects
+  unsigned/untrusted images at admission. Pin every image by **digest**.
+
+---
+
+## 6. Edge, TLS & WAF
+
+- **ACM** certificates (DNS-validated) for all public hostnames; **Route53** as
+  authoritative DNS + health checks (replaces local split-DNS).
+- **CloudFront** in front of the app/UI with **AWS WAF** (managed rule groups +
+  rate limiting + geo/IP rules); origin is the **ALB** via the AWS LB Controller
+  ingress.
+- Flip the plain-HTTP shortcuts: TLS + ACM on
+  `bootstrap/eks/argocd-ingress.yaml`, `bootstrap/gitea/ingress.yaml`,
+  `gitops-apps/observability/overlays/{dev,prod}/ingress.yaml`; HTTPS redirect
+  on. **ACM Private CA** for internal mTLS where required.
+
+---
+
+## 7. Security & audit baseline
+
+Account-wide guardrails, enforced via Organizations:
+
+- **CloudTrail org trail** (all regions, log-file validation) → S3 + CloudWatch
+  Logs.
+- **AWS Config** (recorder + conformance packs) and **Security Hub** (CIS / AWS
+  Foundational standards) aggregated org-wide.
+- **GuardDuty** (incl. EKS audit-log + runtime monitoring, S3, malware).
+- **VPC Flow Logs** (§2.1) and **IAM Access Analyzer** (§2.2).
+- **Kyverno** in-cluster (admission policy) complements **AWS Config rules**:
+  no `:latest`, require requests/limits, non-root + drop ALL caps +
+  `readOnlyRootFilesystem`, require ECR images, `verifyImages`, forbid
+  `emptyDir` for stateful workloads. **Pod Security Admission `restricted`** on
+  app/observability namespaces (`gitops-apps/platform/base/namespaces.yaml`).
+  **NetworkPolicy** (Cilium/Calico) default-deny complements Security Groups.
+
+---
+
+## 8. Data — Aurora + ElastiCache
+
+- **Aurora PostgreSQL** (Multi-AZ, ≥2 instances), **storage encrypted (KMS)**,
+  **PITR**, automated + manual snapshots, **IAM database auth** /
+  Secrets-Manager-rotated app credentials. Replaces the in-cluster
+  `emptyDir` Postgres. **RLS policies** (`migrations/policies/*.sql`) are the
+  tenant-isolation boundary — unchanged.
+- **ElastiCache (Redis)** Multi-AZ with automatic failover, encryption
+  in-transit + at-rest, for session/cache workloads.
+- Subnets isolated (§2.1); access only from node Security Groups.
+
+---
+
+## 9. Observability & alerting
+
+The three pillars exist (`gitops-apps/observability/base/*`) but are `emptyDir`.
+Make them durable and AWS-native:
+
+- **S3-backed Loki/Tempo**: switch `loki.yaml` `storage.filesystem` → S3 and
+  `tempo.yaml` storage → S3 (via IRSA). Lengthen retention past 24h/1h.
+- **CloudWatch** Logs/Metrics + **dashboards** + **Container Insights**;
+  optionally **Amazon Managed Prometheus (AMP)** + **Amazon Managed Grafana**
+  for managed long-term metrics, or persistent self-hosted Prometheus
+  (`gitops-apps/observability/base/prometheus.yaml`) with a PVC + CloudWatch
+  remote-write.
+- **Alerting**: **CloudWatch Alarms → SNS → SES** (and/or PagerDuty/Slack via
+  SNS). Alarms for SLO burn-rate, Argo sync health, cert expiry, ESO sync
+  failures, Kyverno denials, RDS/ElastiCache health, GuardDuty findings.
+- **Audit/log retention** to S3 with lifecycle → Glacier.
+
+---
+
+## 10. Backup & DR
+
+- **AWS Backup** plans covering Aurora, EBS/EFS, and DynamoDB into a
+  **KMS-encrypted backup vault**; cross-region copy for prod; vault-lock for
+  immutability.
+- **S3** for Loki/Tempo blocks (§9), GitOps state, and exports — versioned,
+  lifecycle-managed.
+- Rehearse restore after a deliberate wipe; track **RPO/RTO**. Argo controllers
+  are reconstructable from Git — back up *data*, not controllers.
+
+---
+
+## 11. CI/CD & promotion
+
+- **Gitea Actions** gate on every PR to `gitops-apps`/app: `kustomize build` →
+  `kubeconform` → `kyverno test`/`conftest` → Trivy → diff preview (formalizes
+  the existing `task validate` / `task validate:kustomize`). Branch protection +
+  CODEOWNERS.
+- **Argo Rollouts** in dev/prod for canary/blue-green with Prometheus/CloudWatch
+  analysis + auto-rollback.
+- **Promotion DEV→PROD** stays PR-driven (existing `promote`/`ship` tasks) but
+  bumps an **ECR digest** with a required approver — never a floating tag.
+
+---
+
+## 12. Cost & governance
+
+- **AWS Organizations** with **SCPs** (deny risky regions/services, enforce
+  encryption + tagging); per-team **IAM** with permissions boundaries.
+- **Cost Explorer + Budgets** with alerts; **mandatory tagging** policy
+  (team/env/cost-center) enforced via Config + SCP.
+- **ResourceQuota + LimitRange** per namespace; scoped Argo AppProjects
+  (tighten the `*/*` wildcards in `bootstrap/eks/appprojects.yaml`).
+
+---
+
+## 13. Phased roadmap (execute top to bottom)
 
 Each phase ends green before the next begins.
 
-| Phase | Adds | Validate |
-|------|------|----------|
-| **P0. Foundation** | Cilium (replaces kindnet), cert-manager + trust-manager, **private CA trusted on host + nodes** | `https://` green; CA bundle ConfigMap in all namespaces |
-| **P1. Identity** | **Keycloak** + realm/clients/groups; Mailpit | log into Keycloak; OIDC discovery URL over trusted TLS |
-| **P2. TLS cutover** | flip all Ingresses to TLS; remove Argo `insecure`; mesh mTLS | every UI HTTPS; Argo healthy without `insecure` |
-| **P3. SSO** | wire Argo / Grafana / Gitea to Keycloak (apiserver OIDC optional) | group-based login; anonymous Grafana gone |
-| **P4. Secrets** | Vault + k8s auth; repoint ESO; SOPS/Sealed; purge plaintext | no creds in Git; ExternalSecrets sync from Vault |
-| **P5. Guardrails** | Kyverno (audit→enforce), PSA `restricted`, default-deny NetworkPolicies, scope AppProjects, nginx webhooks on | violations blocked; default-deny holds |
-| **P6. Supply chain** | Harbor + Trivy + cosign; build→push→verify; SBOMs | unsigned image rejected at admission |
-| **P7. CI/CD** | Gitea Actions gates, branch protection, Argo Rollouts, digest-pinned promotion | PR fails on bad manifest; canary + auto-rollback |
-| **P8. Durability/DR** | multi-node, PVCs everywhere (**incl. Loki/Tempo**), CNPG, Argo HA, MinIO, Velero | kill a pod → no data loss; restart keeps logs/traces; Velero restore works |
-| **P9. Operate** | **Alertmanager + Thanos** (Loki/Tempo already live), quotas, OpenCost, audit→Loki | alert fires to Mailpit; metrics+logs+traces correlate across restart |
+| Phase | Adds | Key AWS services | Validate |
+|------|------|------------------|----------|
+| **P0. Foundation** | Multi-AZ VPC, IAM/IRSA, KMS CMKs, EKS + Argo, LB Controller, CSI | VPC, IAM, KMS, EKS, ECR endpoints | nodes Ready; IRSA assumes role; ALB provisions |
+| **P1. Identity** | Cognito pool/clients/groups, MFA, advanced security; Argo/Grafana OIDC | Cognito | group claim drives RBAC; MFA enforced |
+| **P2. Secrets** | ESO → Secrets Manager + SSM via IRSA, KMS, rotation; purge plaintext | Secrets Mgr, SSM, KMS | no creds in Git; ExternalSecrets sync; rotation works |
+| **P3. Supply chain** | ECR scan-on-push + immutable tags, Trivy, cosign, SBOM | ECR | unsigned image rejected; CI fails on critical CVE |
+| **P4. Edge/TLS/WAF** | ACM, Route53, CloudFront + WAF, ALB ingress | ACM, Route53, CloudFront, WAF | HTTPS green; WAF blocks rule hits |
+| **P5. Security baseline** | CloudTrail org trail, Config, Security Hub, GuardDuty, Flow Logs, Access Analyzer; Kyverno + NetworkPolicy | CloudTrail, Config, Security Hub, GuardDuty | Security Hub score; findings route to SNS |
+| **P6. Data** | Aurora Multi-AZ + PITR, ElastiCache, isolated subnets | Aurora, ElastiCache | failover test; PITR restore; RLS isolation holds |
+| **P7. Observability** | S3-backed Loki/Tempo, CloudWatch + (AMP/AMG), Alarms→SNS→SES | CloudWatch, S3, SNS, SES | restart keeps logs/traces; alarm fires |
+| **P8. Backup/DR** | AWS Backup vault, cross-region copy, restore drill | AWS Backup, S3 | wipe → restore; RPO/RTO tracked |
+| **P9. CI/CD & cost** | Actions gates, Argo Rollouts, SCPs, Budgets, quotas, tagging | Organizations, Cost Explorer | PR gate blocks; canary rolls back; budget alert |
 
 ---
 
-## 13. Repo changes summary
+## 14. Repo changes summary (real paths)
 
-**New under `gitops-apps/platform/`:** `ca-issuer.yaml`, `keycloak/`, `vault/`,
-`harbor/`, `minio/`, `cilium/` (or bootstrapped), `kyverno/`, `velero/`,
-`mailpit/`, `trust-manager-bundle.yaml`.
+**Infra (new production stack alongside `lab/`):**
+- `infra/terragrunt/prod/…` + `infra/terraform/<module>/…` — VPC, EKS, IAM/IRSA,
+  KMS, ECR, Cognito, ACM/CloudFront/WAF/Route53, Aurora, ElastiCache, AWS
+  Backup, CloudTrail/Config/Security Hub/GuardDuty modules.
+- `infra/terraform/lab/variables.tf` — `var.floci` gate (true=local emulator,
+  false=real AWS).
+- `lib/common.sh` / `install.sh` / `Taskfile.yml` — IRSA-based bootstrap (no
+  static keys); ECR push path; S3 backup targets; keep `install`,
+  `eks:bootstrap`, `gitea:ship`.
 
-**New under `gitops-apps/observability/`:** `alertmanager/`, `thanos/`,
-`opencost/`. *(Loki, Tempo, otel-agent, kube-state-metrics already exist.)*
+**Bootstrap (per-EKS, via kubectl):**
+- `bootstrap/eks/argocd-ingress.yaml`, `bootstrap/gitea/ingress.yaml` — ACM TLS
+  + ALB + redirect.
+- `bootstrap/eks/appprojects.yaml` — scope `sourceRepos`/whitelists off `*`.
+- `bootstrap/ingress-nginx/values.yaml` — replaced/augmented by AWS LB
+  Controller; webhooks on.
+- new `bootstrap/eks/kyverno-app.yaml` alongside `observability-app.yaml`.
 
-**New `Application` manifests** in `platform-config/envs/{dev,prod}/` for each
-of the above (sync-waves: CNI/cert-manager earliest, then CA, Keycloak, Vault,
-the rest).
-
-**Modified existing files:**
-- `clusters/*.yaml` → `disableDefaultCNI: true`, multi-node, apiserver OIDC
-  `extraArgs` + CA `extraMounts` (P0/P3/P8).
-- `bootstrap/argocd/argocd-cmd-params.yaml` → drop `server.insecure`.
-- `bootstrap/argocd/ingress-*.yaml`, `bootstrap/gitea/ingress.yaml`,
-  `gitops-apps/observability/overlays/*/ingress.yaml` → TLS + `gitops-ca` + redirect.
-- `bootstrap/ingress-nginx/values.yaml` → webhooks on, drop snippet annotations.
-- `platform-config/envs/*/project.yaml` → scope `sourceRepos`/whitelists.
-- `gitops-apps/platform/base/secretstore.yaml` → Vault provider (k8s auth).
-- `gitops-apps/platform/base/{namespaces,rbac}.yaml` → PSA labels, scoped RBAC.
-- `gitops-apps/observability/base/grafana.yaml` → OIDC, no anon, secret from
-  Vault (keep existing Prometheus/Loki/Tempo datasources).
-- **`gitops-apps/observability/base/{loki,tempo,otel-agent}.yaml` → PVCs +
-  longer retention (and MinIO backend for scale-out).** *(new in this revision)*
-- `gitops-apps/dependencies/base/postgres.yaml` → CNPG cluster, PVC.
-- `lib/common.sh` / `install.sh` / `Taskfile.yml` → CA gen + node trust, Cilium
-  bootstrap, Harbor push path, Vault seeding, no plaintext creds; add
-  `task` targets for the new phases.
-
----
-
-## 14. What's genuinely real vs. simulated (even at full local)
-
-- **Real:** TLS chains, OIDC SSO, secrets via Vault k8s-auth, policy admission,
-  network policy, image signing/verification, backup/restore, the full GitOps +
-  promotion process, and the metrics/logs/traces correlation already wired.
-- **Simulated:** hardware **fault domains** (multi-node kind = containers on one
-  host); **workload identity** (Vault k8s-auth models IRSA, isn't cloud IAM);
-  single-host blast radius. Patterns faithful; physical resilience is not.
+**GitOps apps (kustomize):**
+- `gitops-apps/platform/base/secretstore.yaml` — IRSA + Secrets Manager store.
+- `gitops-apps/platform/base/{namespaces,rbac}.yaml` — PSA `restricted`, scoped
+  RBAC, ResourceQuota/LimitRange.
+- `gitops-apps/observability/base/{loki,tempo}.yaml` — S3 backend + retention.
+- `gitops-apps/observability/base/prometheus.yaml` — PVC + CloudWatch/AMP.
+- `gitops-apps/observability/base/grafana.yaml` — Cognito OIDC, no anon, secret
+  from Secrets Manager.
 
 ---
 
 ## 15. First concrete step
 
-Phase 0 is the unblock-everything step and the only one with a sharp edge (CA
-trust on the kind nodes):
-1. Recreate clusters with `disableDefaultCNI: true` + Cilium.
-2. Generate the root CA, mount it into the nodes, trust it on the host.
-3. Install cert-manager + trust-manager; confirm a test `Certificate` issues and
-   `https://<anything>.dev.local` is green.
+P0 is the unblock-everything step:
+1. Stand up the **production Terragrunt stack**: multi-AZ VPC, EKS with the OIDC
+   provider, KMS CMKs, and the core **IRSA roles** (external-secrets, LB
+   Controller, CSI).
+2. Install **Argo CD on EKS** and point it at `gitops-apps` — the existing
+   `bootstrap/eks/*` + overlays reconcile unchanged.
+3. Verify IRSA (a pod assumes its role and reads a test SSM parameter), the ALB
+   provisions from an ingress, and the EBS CSI binds a PVC.
 
-A fast early win that needs none of the above: **put the new Loki/Tempo on PVCs
-(§8/§10)** so observability data survives a restart — small change, immediate
-realism, and it sets up the Kyverno "no emptyDir for stateful" rule later.
+A fast early win that needs little: **switch `loki.yaml` / `tempo.yaml` to S3
+(via IRSA)** so observability survives restarts and sets up the Kyverno
+"no emptyDir for stateful" rule in P5.
 
-Once Phase 0 is solid, the remaining phases are additive `Application`s that
-Argo reconciles — the same workflow the lab already demonstrates.
+Once P0 is solid, the remaining phases are additive Terraform modules + Argo
+`Application`s the cluster reconciles — the same GitOps workflow the lab already
+demonstrates, now against real AWS. Local development continues on **floci**
+(§1) as the inner loop, with `var.floci=true` gating the services LocalStack
+can't run.

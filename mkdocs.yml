@@ -56,3 +56,4 @@ nav:
   - Reference:
       - Repository Layout: repository.md
       - Operations: operations.md
+  - Enterprise: enterprise.md
