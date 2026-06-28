@@ -247,7 +247,7 @@ setup_dns() {
   # KIND serves ONLY Gitea (MGMT_IP). Everything else — Argo CD, the GitOps UI,
   # AND observability (Grafana) — runs on the app's floci-EKS clusters and
   # resolves to their own ingress IPs (EKS_DEV_IP/EKS_PROD_IP, pinned by the
-  # app's eks:bootstrap-net). The app owns its OWN hostname (todo-app.*.local)
+  # platform's eks:bootstrap-net). The app owns its OWN hostname (todo-app.*.local)
   # — see the app repo's `task eks:hosts`.
   declare -A HOSTS=(
     [gitea.dev.local]="$MGMT_IP"
@@ -299,26 +299,16 @@ setup_dns_hosts() {
 }
 
 output() {
-  step "Platform ready"
-  # Uniform lab credentials (set at install); no per-cluster random password.
-  # The platform is app-agnostic. The todo-app onboards itself from its own repo
-  # and runs on its floci-EKS clusters (its OWN Argo CD), reachable once shipped.
-  local app_note=$'\n------------------------------------------------------------------\n  Everything else lives on the app\'s floci-EKS clusters (Argo CD + the app +\n  observability), stood up by the app pipeline:\n    from the app repo:  task gitea:create-repo && task gitea:ship\n    DEV(AUTO):    ci -> terragrunt apply (dev) -> deploy to floci-EKS dev (.230)\n    PROD(MANUAL): promote workflow -> terragrunt apply (prod) -> floci-EKS prod (.240)\n    Argo + Grafana resolve to the EKS ingress; Argo password: task eks:argo-password ENV=dev'
+  step "Management plane ready (kind / Gitea)"
+  # This is the KUBERNETES half only. `task install` still has to provision the
+  # Gitea runner and bootstrap the floci-EKS clusters (Argo CD + observability)
+  # — it prints the final "lab is UP" banner once those finish. Don't claim the
+  # whole lab here, or the banner fires before the EKS bootstrap has run.
   cat <<EOF
 
-==================================================================
-  🚀  GitOps Enterprise Lab is UP
-==================================================================
-  Uniform credentials — one password for all: ${LAB_PASSWORD}
-  management plane (kind) — Gitea only
-    Gitea        http://gitea.dev.local         ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
-  workload plane (floci-EKS, once the app pipeline has run)
-    Argo CD      http://argo.dev.local          (admin / task eks:argo-password ENV=dev)
-    Grafana      http://grafana.dev.local       (admin / ${LAB_PASSWORD})
-    todo-app     http://todo-app.dev.local
-------------------------------------------------------------------
-  Tip:  KUBECONFIG=/tmp/floci-eks-dev.kubeconfig k9s   (after task eks:kubeconfig ENV=dev)${app_note}
-==================================================================
+  Gitea   http://gitea.dev.local   ($GITEA_ADMIN_USER / $GITEA_ADMIN_PASSWORD)
+
+  Next: bootstrapping the floci-EKS clusters (Argo CD + observability)...
 EOF
 }
 

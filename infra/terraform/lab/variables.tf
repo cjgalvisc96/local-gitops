@@ -28,6 +28,25 @@ variable "floci_port" {
   default     = 4566
 }
 
+# --- floci-EKS workload clusters (k3s the platform stands up for the apps) ---
+variable "app_project" {
+  description = "App project embedded in the floci-EKS container names (floci-eks-<app_project>-<env>), matching the app's task references."
+  type        = string
+  default     = "todo-app"
+}
+
+variable "k3s_image" {
+  description = "k3s image for the floci-EKS workload clusters (same shape floci's EKS plugin produces)."
+  type        = string
+  default     = "rancher/k3s:v1.31.5-k3s1"
+}
+
+variable "eks_envs" {
+  description = "Environments to stand up a floci-EKS (k3s) workload cluster for. Host API port = base + index (dev=6443, prod=6444)."
+  type        = list(string)
+  default     = ["dev", "prod"]
+}
+
 # --- kind management cluster ----------------------------------------------
 variable "node_image" {
   description = "kind node image."

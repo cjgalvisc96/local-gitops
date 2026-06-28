@@ -34,6 +34,62 @@ resource "docker_container" "floci" {
 }
 
 ############################################
+# floci-EKS workload clusters (k3s)
+#
+# The platform stands up the app's dev/prod workload clusters as k3s containers
+# — the same shape floci's EKS plugin produces (name floci-eks-<app>-<env>,
+# kubeconfig at /etc/rancher/k3s/k3s.yaml, API on 6443). traefik + servicelb are
+# disabled so the platform's MetalLB + ingress-nginx own LB/ingress. The app's
+# tasks reference these by name; `task eks:bootstrap` then wires Argo +
+# observability so argo.<env>.local / grafana.<env>.local work before any deploy.
+############################################
+resource "docker_image" "k3s" {
+  name         = var.k3s_image
+  keep_locally = true
+}
+
+resource "docker_container" "eks" {
+  for_each = { for i, e in var.eks_envs : e => i }
+
+  name       = "floci-eks-${var.app_project}-${each.key}"
+  image      = docker_image.k3s.image_id
+  privileged = true
+  restart    = "unless-stopped"
+  command    = ["server", "--disable=traefik", "--disable=servicelb", "--tls-san=127.0.0.1", "--write-kubeconfig-mode=644"]
+
+  # Join the kind network (created with the management cluster) so MetalLB can
+  # L2-advertise the EKS LB IPs (.230/.240) where the host + Gitea LB can reach
+  # them, and the in-EKS Argo can pull from Gitea at 172.18.255.209. kind's
+  # bridge has outbound NAT, so image pulls still work.
+  networks_advanced {
+    name = "kind"
+  }
+  depends_on = [kind_cluster.management]
+
+  # Fixed host API port per env (dev=6443, prod=6444) — deterministic for
+  # Terraform; `task eks:kubeconfig` reads whatever HostPort docker reports.
+  ports {
+    internal = 6443
+    external = 6443 + each.value
+  }
+
+  # k3s-in-docker needs writable /run + /var/run.
+  tmpfs = {
+    "/run"     = ""
+    "/var/run" = ""
+  }
+
+  labels {
+    label = "com.docker.compose.project"
+    value = var.project_name
+  }
+  labels {
+    label = "com.docker.compose.service"
+    value = "floci-eks-${each.key}"
+  }
+}
+
+############################################
 # kind — the management cluster (Gitea host)
 ############################################
 resource "kind_cluster" "management" {

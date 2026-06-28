@@ -63,7 +63,7 @@ apply_net_prefix() {
   # KIND (management) only needs a small pool for Gitea's LoadBalancer.
   export MGMT_POOL="${NET_PREFIX}.255.200-${NET_PREFIX}.255.209"
   # The app's floci-EKS clusters advertise their OWN ingress IPs via an in-cluster
-  # MetalLB (the app Taskfile's eks:bootstrap-net pins the same IPs): dev = .230,
+  # MetalLB (this Taskfile's eks:bootstrap-net pins the same IPs): dev = .230,
   # prod = .240 — chosen clear of the kind pool above.
   export EKS_DEV_IP="${NET_PREFIX}.255.230"
   export EKS_PROD_IP="${NET_PREFIX}.255.240"
