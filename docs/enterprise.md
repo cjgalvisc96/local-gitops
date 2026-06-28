@@ -2,8 +2,7 @@
 
 The production target for this platform is a **full deployment on a real AWS account**. The kind +
 floci lab in this repo is only the local inner-loop emulator (`var.floci=true`); it gates off the
-AWS services LocalStack cannot run and substitutes dev-auth + in-cluster Postgres/Redis. The
-complete, phase-by-phase roadmap is `enterpise-plan.md` at the repository root.
+AWS services LocalStack cannot run and substitutes dev-auth + in-cluster Postgres/Redis.
 
 ## Target AWS platform
 
@@ -27,5 +26,3 @@ The **platform** (this repo) owns the cluster, the GitOps control plane, observa
 **account-level security baseline** (CloudTrail, GuardDuty, Security Hub, Config, Access Analyzer —
 per-account singletons). Each **application** owns its own app-scoped resources (its ECR, secrets,
 WAF, app IRSA roles) and deploys onto the platform's cluster.
-
-See `enterpise-plan.md` at the repo root for the phased P0–P9 milestones and validation criteria.
